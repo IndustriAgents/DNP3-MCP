@@ -538,6 +538,15 @@ def _format_indexes(indexes: list[int]) -> str:
     return shown + (f" and {len(indexes) - 20} more" if len(indexes) > 20 else "")
 
 
+def _abandoned_outcome(stage: str) -> tuple[str, bool]:
+    """(outcome, request_sent) for a control abandoned during `stage`."""
+    if stage in ("queued", "connect"):
+        return OUTCOME_NOT_SENT, False
+    if stage == "SELECT":
+        return OUTCOME_REJECTED, True
+    return OUTCOME_UNKNOWN, True
+
+
 def _with_confirmed_events(exc: DNP3MasterError, log: _CallLog) -> DNP3MasterError:
     """Attach the events of already-confirmed fragments to a failed event poll."""
     events = log.confirmed_events()
@@ -674,15 +683,20 @@ class DNP3Master:
         base_meta = {"outstation": outstation, "index": index, "control_code": code, "mode": mode}
         steps = ("SELECT", "OPERATE") if mode == "select_before_operate" else ("DIRECT_OPERATE",)
         log = _CallLog()
-        stage = "connect"
+        stage = "queued"
         iin = IIN(0)
         deadline = self.control_deadline_s
 
-        async with self._lock:
-            try:
-                with anyio.move_on_after(deadline) as scope:
-                    self._active.add(scope)
-                    try:
+        # The deadline starts with the call and includes waiting for earlier
+        # calls to release the lock: a client that has timed out sends no
+        # notifications/cancelled, so a control queued behind slow calls must
+        # expire on its own and is then never sent.
+        try:
+            with anyio.move_on_after(deadline) as scope:
+                self._active.add(scope)
+                try:
+                    async with self._lock:
+                        stage = "connect"
                         await self._before_send(scope)
                         session = _Session(self, outstation, log)
                         try:
@@ -693,32 +707,38 @@ class DNP3Master:
                                     f"{exc}. No control was sent.", {**base_meta, **not_sent}
                                 ) from exc
                             for function in steps:
-                                # Delivers a client cancellation or disconnect that arrived while
-                                # waiting for the previous answer, before anything is written:
-                                # dnp3py writes a frame before its first await.
+                                # Delivers a deadline, a client cancellation or a disconnect that
+                                # arrived while waiting for the previous answer, before anything is
+                                # written: dnp3py writes a frame before its first await.
                                 await self._before_send(scope)
                                 stage = function
                                 iin |= await self._control_step(session, function, index, value, base_meta)
                             stage = "done"
                         finally:
                             await session.close()
-                    finally:
-                        self._active.discard(scope)
-                if scope.cancelled_caught and stage != "done":
-                    raise self._control_abort_error(stage, index, deadline, base_meta)
-            except DNP3MasterError as exc:
-                log.annotate(exc.meta)
-                raise
-            except BaseException:
-                # A client cancellation: nothing more is sent for this call.
-                logger.warning(
-                    "Control on binary output %d of outstation %d cancelled by the client during %s; "
-                    "nothing more will be sent",
-                    index,
-                    outstation,
-                    stage,
-                )
-                raise
+                finally:
+                    self._active.discard(scope)
+            if scope.cancelled_caught and stage != "done":
+                raise self._control_abort_error(stage, index, deadline, base_meta)
+        except DNP3MasterError as exc:
+            log.annotate(exc.meta)
+            raise
+        except BaseException:
+            # A client cancellation: nothing more is sent for this call.
+            outcome, sent = _abandoned_outcome(stage)
+            logger.warning(
+                "Control on binary output %d of outstation %d cancelled by the client during %s; nothing more will "
+                "be sent (outcome %s, request_sent %s)%s",
+                index,
+                outstation,
+                stage,
+                outcome,
+                str(sent).lower(),
+                "; the control may have been applied, read the output's state back before retrying"
+                if outcome == OUTCOME_UNKNOWN
+                else "",
+            )
+            raise
 
         meta = {
             **base_meta,
@@ -799,29 +819,44 @@ class DNP3Master:
                 await session.close()
 
         deadline = self.read_deadline_s
-        async with self._lock:
-            try:
-                with anyio.move_on_after(deadline) as scope:
-                    self._active.add(scope)
-                    try:
+        started = False
+        try:
+            # The deadline includes waiting for the lock (see write_binary_output).
+            with anyio.move_on_after(deadline) as scope:
+                self._active.add(scope)
+                try:
+                    async with self._lock:
+                        started = True
                         await self._before_send(scope)
                         return await self._with_retries(attempt, retry_allowed, scope)
-                    finally:
-                        self._active.discard(scope)
-                if self.closing is not None:
-                    raise DNP3ConnectionError(f"Request abandoned: {self.closing}", {"closing": True})
+                finally:
+                    self._active.discard(scope)
+            if self.closing is not None:
+                raise DNP3ConnectionError(f"Request abandoned: {self.closing}", {"closing": True})
+            where = f"Outstation {outstation} at {self.config.host}:{self.config.port}"
+            if not started:
                 raise DNP3TimeoutError(
-                    f"Outstation {outstation} at {self.config.host}:{self.config.port} did not complete the "
-                    f"request within the overall deadline of {deadline:g} s",
-                    {"deadline_s": deadline},
+                    f"The request to {where.lower()[0] + where[1:]} did not start within the overall deadline of "
+                    f"{deadline:g} s: earlier DNP3 calls were still running. Nothing was sent.",
+                    {"deadline_s": deadline, "queued": True},
                 )
-            except DNP3MasterError as exc:
-                log.annotate(exc.meta)
-                raise
+            raise DNP3TimeoutError(
+                f"{where} did not complete the request within the overall deadline of {deadline:g} s",
+                {"deadline_s": deadline},
+            )
+        except DNP3MasterError as exc:
+            log.annotate(exc.meta)
+            raise
 
     async def _before_send(self, scope: anyio.CancelScope) -> None:
-        """Last stop before anything goes on the wire: honour a disconnect or a cancellation."""
-        if self.closing is not None:
+        """Last stop before anything goes on the wire: honour a disconnect, a cancellation or the deadline.
+
+        The call's one deadline (`scope.deadline`, set when the tool call
+        started) is compared with the clock explicitly: the event loop may
+        resume this task before it runs the deadline's own timer, so a
+        checkpoint alone could let a request out after the deadline.
+        """
+        if self.closing is not None or anyio.current_time() >= scope.deadline:
             scope.cancel()
         await anyio.lowlevel.checkpoint()
 
@@ -852,8 +887,9 @@ class DNP3Master:
     def _control_abort_error(self, stage: str, index: int, deadline: float, meta: dict[str, Any]) -> DNP3ControlError:
         """A control cut short by the overall deadline or by the client disconnecting.
 
-        `stage` is the last request that may have been sent: "connect" (none),
-        "SELECT" (OPERATE never sent) or "OPERATE" / "DIRECT_OPERATE".
+        `stage` is how far the control got: "queued" (waiting for the lock) or
+        "connect" (nothing sent), "SELECT" (OPERATE never sent) or "OPERATE" /
+        "DIRECT_OPERATE" (may have been applied).
         """
         if self.closing is not None:
             message = f"The control on binary output {index} was abandoned ({self.closing})"
@@ -863,7 +899,13 @@ class DNP3Master:
                 f"The control on binary output {index} did not complete within the overall deadline of {deadline:g} s"
             )
             extra = {"deadline_s": deadline}
-        if stage == "connect":
+        if stage == "queued":
+            error = DNP3ControlError(
+                f"{message} while waiting for earlier DNP3 calls to finish. No control was sent, and it will not "
+                "be sent later.",
+                {**meta, "outcome": OUTCOME_NOT_SENT, "request_sent": False, "queued": True, **extra},
+            )
+        elif stage == "connect":
             error = DNP3ControlError(
                 f"{message} before anything was sent. No control was sent.",
                 {**meta, "outcome": OUTCOME_NOT_SENT, "request_sent": False, **extra},
