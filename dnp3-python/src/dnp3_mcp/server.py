@@ -25,6 +25,8 @@ def _package_version(name: str) -> str:
 
 __version__ = _package_version("dnp3-mcp")
 
+WRITE_TOOLS = frozenset({"write_binary_output", "write_point_by_alias"})
+
 INSTRUCTIONS = (
     "Tools for a DNP3 (IEEE 1815) master over TCP. Every tool returns {success, data, error, meta}. "
     "Controls are refused unless DNP3_WRITES_ENABLED=true."
@@ -52,7 +54,10 @@ class EnvelopeFastMCP(FastMCP):
             return await super().call_tool(name, arguments)
         except ToolError as exc:
             if isinstance(exc.__cause__, ValidationError):
-                return err(describe_validation_error(name, exc.__cause__), {"tool": name})
+                meta: dict[str, Any] = {"tool": name}
+                if name in WRITE_TOOLS:
+                    meta.update(outcome="not_sent", request_sent=False)
+                return err(describe_validation_error(name, exc.__cause__), meta)
             raise
 
 

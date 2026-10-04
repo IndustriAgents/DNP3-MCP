@@ -149,6 +149,7 @@ async def test_unrecognised_write_value_is_rejected(tmp_path: Path, raw: Any) ->
         envelope = await call(server, tool, args)
         assert envelope["success"] is False
         assert envelope["error"].startswith(f"Invalid arguments for {tool}: value")
+        assert (envelope["meta"]["outcome"], envelope["meta"]["request_sent"]) == ("not_sent", False)
     assert master.calls == []
 
 
