@@ -6,6 +6,16 @@ and closes the connection again. Operations are serialised, so only one
 connection is open at a time. Nothing is cached: every value returned was
 read from the outstation during the call that returns it.
 
+dnp3py is pinned to one release because this module relies on some of its
+internals and works around two of its defects:
+
+- Its CommandBuilder writes a one-octet object count with qualifier 0x28, so
+  every CROB on an index above 255 is malformed. Control requests are encoded
+  here instead (`crob_object_block`).
+- Its runner confirms a response fragment even when it could only partly
+  decode it, which tells the outstation to delete events this server never
+  saw. `_GuardedRunner` withholds that CONFIRM for event data.
+
 Only TCP is implemented. Serial is rejected when the configuration is read.
 """
 
@@ -19,13 +29,18 @@ from datetime import datetime
 from typing import Any, TypeVar
 
 import anyio
-from dnp3.application.builder import build_all_objects_request
-from dnp3.application.fragment import RequestFragment
+from dnp3.application.builder import (
+    build_all_objects_request,
+    build_direct_operate_request,
+    build_operate_request,
+    build_select_request,
+)
+from dnp3.application.fragment import ObjectBlock, RequestFragment
 from dnp3.application.parser import ParseError, parse_response
+from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.enums import CommandStatus, FunctionCode
 from dnp3.core.flags import IIN, AnalogQuality, BinaryQuality, CounterQuality, DoubleBitQuality
 from dnp3.master import Master, MasterConfig, MasterRunnerError, MasterTcpRunner, ResponseTimeoutError
-from dnp3.master.commands import CommandBuilder
 from dnp3.master.handler import ResponseInfo
 from dnp3.transport_io import ChannelError, TcpClientChannel, TcpConfig
 
@@ -52,11 +67,28 @@ _QUALITY_FLAGS: dict[str, type] = {
 # Bits that carry the value (or nothing), not a quality.
 _NOT_QUALITY = {"STATE", "STATE_BIT_0", "STATE_BIT_1", "RESERVED"}
 
-# g12v1 control relay output block: control code, count, on-time (4),
-# off-time (4), status. The status octet is the last of the 11.
-_CROB_GROUP_VARIATION = (12, 1)
-_CROB_SIZE = 11
-_CROB_QUALIFIERS = {0x17: (1, 1), 0x28: (2, 2)}  # qualifier -> (count octets, index octets)
+# g12v1 control relay output block (IEEE 1815-2012 A.8.1): control code (1),
+# count (1), on-time (4), off-time (4), status (1).
+CROB_GROUP = 12
+CROB_VARIATION = 1
+CROB_SIZE = 11
+QUALIFIER_8BIT_INDEX = 0x17  # 1-octet count, 1-octet index prefix
+QUALIFIER_16BIT_INDEX = 0x28  # 2-octet count, 2-octet index prefix
+_CROB_QUALIFIERS = {QUALIFIER_8BIT_INDEX: (1, 1), QUALIFIER_16BIT_INDEX: (2, 2)}
+LATCH_ON = 0x03
+LATCH_OFF = 0x04
+
+_CONTROL_BUILDERS = {
+    "SELECT": build_select_request,
+    "OPERATE": build_operate_request,
+    "DIRECT_OPERATE": build_direct_operate_request,
+}
+
+# meta.outcome of a control, so a client can act on it without parsing text.
+OUTCOME_OPERATED = "operated"  # the outstation confirmed the OPERATE / DIRECT_OPERATE with SUCCESS
+OUTCOME_REJECTED = "rejected"  # the outstation refused it (status or IIN); nothing operated
+OUTCOME_NOT_SENT = "not_sent"  # no OPERATE / DIRECT_OPERATE was sent; nothing operated
+OUTCOME_UNKNOWN = "unknown"  # an OPERATE / DIRECT_OPERATE may have been sent but was not confirmed
 
 T = TypeVar("T")
 
@@ -110,6 +142,91 @@ def command_status_name(code: int) -> str:
         return f"STATUS_{code}"
 
 
+def describe_truncation(info: ResponseInfo) -> str:
+    cut = info.truncation
+    if cut is None:
+        return ""
+    where = f"group {cut.group} variation {cut.variation}" if cut.group is not None else "trailing octets"
+    kind = "Unsolicited response" if info.is_unsolicited else "Response"
+    return (
+        f"{kind} fragment {info.sequence} could not be fully decoded ({cut.reason.value} at {where}); "
+        "objects from that point on in the fragment were not returned"
+    )
+
+
+# -- CROB encoding ------------------------------------------------------------
+
+
+def crob_object(code: int, *, count: int = 1, on_time: int = 0, off_time: int = 0, status: int = 0) -> bytes:
+    """The 11 octets of one g12v1 object."""
+    return (
+        bytes([code, count]) + on_time.to_bytes(4, "little") + off_time.to_bytes(4, "little") + bytes([status & 0x7F])
+    )
+
+
+def crob_object_block(index: int, code: int) -> ObjectBlock:
+    """One g12v1 object for `index`, with the qualifier and count width IEEE 1815-2012 requires.
+
+    Qualifier 0x17 (one-octet count and index) up to index 255, 0x28 (two-octet
+    count and index) above it.
+    """
+    if not 0 <= index <= MAX_POINT_INDEX:
+        raise ValueError(f"CROB index must be 0-{MAX_POINT_INDEX}, got {index}")
+    if index <= 0xFF:
+        qualifier, prefix = QUALIFIER_8BIT_INDEX, bytes([1, index])
+    else:
+        qualifier, prefix = QUALIFIER_16BIT_INDEX, (1).to_bytes(2, "little") + index.to_bytes(2, "little")
+    header = ObjectHeader(group=CROB_GROUP, variation=CROB_VARIATION, qualifier=qualifier)
+    return ObjectBlock(header=header, data=prefix + crob_object(code))
+
+
+def build_crob_request(function: str, index: int, value: bool, seq: int) -> RequestFragment:
+    """SELECT, OPERATE or DIRECT_OPERATE latching binary output `index` on (True) or off (False)."""
+    block = crob_object_block(index, LATCH_ON if value else LATCH_OFF)
+    return _CONTROL_BUILDERS[function](objects=(block,), seq=seq)
+
+
+def crob_echoes(fragments: list[bytes]) -> dict[int, bytes]:
+    """Map point index -> the 11-octet g12v1 object echoed for it in solicited fragments."""
+    echoes: dict[int, bytes] = {}
+    for raw in fragments:
+        try:
+            response = parse_response(raw)
+        except (ParseError, ValueError, IndexError):
+            continue
+        if response.header.control.uns:
+            continue
+        for block in response.objects:
+            header = block.header
+            if (header.group, header.variation) != (CROB_GROUP, CROB_VARIATION):
+                continue
+            sizes = _CROB_QUALIFIERS.get(header.qualifier)
+            if sizes is None:
+                continue
+            count_size, index_size = sizes
+            data = block.data
+            if len(data) < count_size:
+                continue
+            count = int.from_bytes(data[:count_size], "little")
+            pos = count_size
+            for _ in range(count):
+                end = pos + index_size + CROB_SIZE
+                if end > len(data):
+                    break
+                index = int.from_bytes(data[pos : pos + index_size], "little")
+                echoes[index] = bytes(data[pos + index_size : end])
+                pos = end
+    return echoes
+
+
+def crob_statuses(fragments: list[bytes]) -> dict[int, int]:
+    """Map point index -> status code for every g12v1 object echoed in solicited fragments."""
+    return {index: echo[-1] & 0x7F for index, echo in crob_echoes(fragments).items()}
+
+
+# -- dnp3py plumbing ----------------------------------------------------------
+
+
 @dataclass(frozen=True, slots=True)
 class PointValue:
     """One value as the outstation reported it."""
@@ -134,29 +251,45 @@ class PointValue:
                 "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             }
         )
-        if with_kind:
-            out["unsolicited"] = self.unsolicited
         return out
+
+
+@dataclass
+class _CallLog:
+    """What one tool call received outside the replies it asked for."""
+
+    unsolicited: list[PointValue] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def annotate(self, meta: dict[str, Any]) -> dict[str, Any]:
+        if self.unsolicited:
+            # These were confirmed, so the outstation has deleted them: they must not be dropped.
+            meta["unsolicited"] = [v.as_dict(with_kind=True) for v in self.unsolicited]
+        if self.warnings:
+            meta.setdefault("warnings", []).extend(w for w in self.warnings if w not in meta["warnings"])
+        return meta
 
 
 class _Collector:
     """SOE handler that records every value delivered during a session."""
 
-    def __init__(self) -> None:
+    def __init__(self, log: _CallLog) -> None:
         self.values: list[PointValue] = []
+        self._log = log
 
     def _add(self, kind: str, values: list[Any], info: ResponseInfo, convert: Callable[[Any], Any]) -> None:
         for v in values:
-            self.values.append(
-                PointValue(
-                    kind=kind,
-                    index=int(v.index),
-                    value=convert(v),
-                    flags=int(v.quality),
-                    timestamp=v.timestamp,
-                    unsolicited=bool(info.is_unsolicited),
-                )
+            point = PointValue(
+                kind=kind,
+                index=int(v.index),
+                value=convert(v),
+                flags=int(v.quality),
+                timestamp=v.timestamp,
+                unsolicited=bool(info.is_unsolicited),
             )
+            self.values.append(point)
+            if point.unsolicited:
+                self._log.unsolicited.append(point)
 
     def on_binary_input(self, values: list[Any], info: ResponseInfo) -> None:
         self._add("binary_input", values, info, lambda v: bool(v.value))
@@ -182,17 +315,60 @@ class _Collector:
 
 @dataclass
 class _CapturingMaster(Master):
-    """dnp3py Master that keeps the raw response fragments.
+    """dnp3py Master that keeps the raw fragments and the last parsed fragment's info.
 
     dnp3py does not hand control-status echoes to the SOE handler, so the
-    g12v1 status octets are decoded from these fragments instead.
+    g12v1 objects are decoded from these fragments instead.
     """
 
     fragments: list[bytes] = field(default_factory=list, init=False)
+    last_info: ResponseInfo | None = field(default=None, init=False)
+    log: _CallLog = field(default_factory=_CallLog, init=False)
 
     def process_response(self, data: bytes) -> ResponseInfo | None:
         self.fragments.append(bytes(data))
-        return super().process_response(data)
+        info = super().process_response(data)
+        self.last_info = info
+        if info is not None and info.is_unsolicited and info.truncation is not None:
+            self.log.warnings.append(describe_truncation(info) + "; it was not confirmed")
+        return info
+
+
+class _UnconfirmedFragment(DNP3ProtocolError):
+    """A partly decoded event fragment was left unconfirmed, so the exchange cannot go on."""
+
+
+@dataclass
+class _GuardedRunner(MasterTcpRunner):
+    """MasterTcpRunner that does not CONFIRM event data it could only partly decode.
+
+    A CONFIRM tells the outstation it may delete the events in that fragment.
+    dnp3py 0.6.0 sends it even when it stopped decoding part way, so events
+    after the stopping point would be lost. Unsolicited
+    fragments always carry events; solicited ones do for Class 1-3 polls
+    (`protect_solicited`).
+    """
+
+    protect_solicited: bool = False
+    withheld: list[tuple[int, bool]] = field(default_factory=list, init=False, repr=False)
+
+    async def _send_confirm(self, sequence: int, *, uns: bool, deadline: float) -> None:
+        info = getattr(self.master, "last_info", None)
+        partial = (
+            info is not None
+            and info.truncation is not None
+            and info.sequence == sequence
+            and bool(info.is_unsolicited) == uns
+        )
+        if partial and (uns or self.protect_solicited):
+            self.withheld.append((sequence, uns))
+            logger.warning("Not confirming %s", describe_truncation(info))
+            if not uns and not info.fin:
+                # The outstation will not send the next fragment until this
+                # one is confirmed, so the exchange ends here.
+                raise _UnconfirmedFragment(describe_truncation(info))
+            return
+        await super()._send_confirm(sequence, uns=uns, deadline=deadline)
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,26 +386,16 @@ class _Reply:
 
     @property
     def warnings(self) -> list[str]:
-        """Fragments the library could only partly decode. Values after the stopping point were not delivered."""
-        out = []
-        for info in self.infos:
-            cut = info.truncation
-            if cut is None:
-                continue
-            where = f"group {cut.group} variation {cut.variation}" if cut.group is not None else "trailing octets"
-            out.append(
-                f"Response fragment {info.sequence} could not be fully decoded ({cut.reason.value} at {where}); "
-                "objects from that point on in the fragment were not returned"
-            )
-        return out
+        """Solicited fragments the library could only partly decode."""
+        return [describe_truncation(info) for info in self.infos if info.truncation is not None]
 
 
 class _Session:
-    def __init__(self, master: DNP3Master, outstation: int) -> None:
+    def __init__(self, master: DNP3Master, outstation: int, log: _CallLog, *, protect_solicited: bool = False) -> None:
         cfg = master.config
         self._describe = f"outstation {outstation} at {cfg.host}:{cfg.port}"
         self._timeout_s = cfg.timeout_s
-        self.collector = _Collector()
+        self.collector = _Collector(log)
         self.master = _CapturingMaster(
             handler=self.collector,
             config=MasterConfig(
@@ -238,13 +404,15 @@ class _Session:
                 response_timeout=cfg.timeout_s,
             ),
         )
+        self.master.log = log
         self.channel = TcpClientChannel(config=TcpConfig(host=cfg.host, port=cfg.port, connect_timeout=cfg.timeout_s))
-        self.runner = MasterTcpRunner(
+        self.runner = _GuardedRunner(
             master=self.master,
             host=cfg.host,
             port=cfg.port,
             response_timeout=cfg.timeout_s,
             channel=self.channel,
+            protect_solicited=protect_solicited,
         )
 
     async def open(self) -> None:
@@ -270,38 +438,8 @@ class _Session:
             raise DNP3ConnectionError(f"Link to {self._describe} failed: {exc or type(exc).__name__}") from exc
         return _Reply(infos=list(infos), fragments=list(self.master.fragments), values=self.collector.values[first:])
 
-
-def crob_statuses(fragments: list[bytes]) -> dict[int, int]:
-    """Map point index -> status octet for every g12v1 object echoed in solicited fragments."""
-    statuses: dict[int, int] = {}
-    for raw in fragments:
-        try:
-            response = parse_response(raw)
-        except (ParseError, ValueError, IndexError):
-            continue
-        if response.header.control.uns:
-            continue
-        for block in response.objects:
-            header = block.header
-            if (header.group, header.variation) != _CROB_GROUP_VARIATION:
-                continue
-            sizes = _CROB_QUALIFIERS.get(header.qualifier)
-            if sizes is None:
-                continue
-            count_size, index_size = sizes
-            data = block.data
-            if len(data) < count_size:
-                continue
-            count = int.from_bytes(data[:count_size], "little")
-            pos = count_size
-            for _ in range(count):
-                end = pos + index_size + _CROB_SIZE
-                if end > len(data):
-                    break
-                index = int.from_bytes(data[pos : pos + index_size], "little")
-                statuses[index] = data[end - 1] & 0x7F
-                pos = end
-    return statuses
+    def next_sequence(self) -> int:
+        return self.master.next_request_sequence()
 
 
 def _check_outstation(outstation: int) -> None:
@@ -348,67 +486,81 @@ class DNP3Master:
 
         def build(session: _Session) -> RequestFragment:
             if event_class == 0:
-                return build_all_objects_request(
-                    FunctionCode.READ, CLASS_DATA_GROUP, 1, seq=session.master.next_request_sequence()
-                )
+                return build_all_objects_request(FunctionCode.READ, CLASS_DATA_GROUP, 1, seq=session.next_sequence())
             return session.master.build_class_poll(
                 class_1=event_class == 1, class_2=event_class == 2, class_3=event_class == 3
             )
 
+        log = _CallLog()
         started = time.perf_counter()
-        reply, attempts = await self._read_with_retries(outstation, build)
-        meta = self._meta(outstation, started, attempts, reply)
+        try:
+            reply, attempts = await self._read_with_retries(outstation, build, log, protect_solicited=event_class > 0)
+        except _UnconfirmedFragment as exc:
+            raise DNP3ProtocolError(
+                f"The class {event_class} poll response could not be fully decoded: {exc}. It was not confirmed, "
+                "so an outstation that waits for confirmation keeps those events.",
+                log.annotate({**self._meta(outstation, started, 1), "incomplete": True, "warnings": [str(exc)]}),
+            ) from exc
+        meta = log.annotate(self._meta(outstation, started, attempts, reply))
         self._raise_for_iin(reply.iin, "READ", meta)
-        points = [v.as_dict(with_kind=True) for v in reply.values]
+        if event_class > 0 and reply.warnings:
+            raise DNP3ProtocolError(
+                f"The class {event_class} poll response could not be fully decoded, so it was not confirmed and "
+                "nothing is returned as complete. An outstation that waits for confirmation keeps those events. "
+                + " ".join(reply.warnings),
+                meta,
+            )
+        points = [v.as_dict(with_kind=True) for v in reply.values if not v.unsolicited]
         return {"outstation": outstation, "class": event_class, "count": len(points), "points": points}, meta
 
     async def write_binary_output(self, outstation: int, index: int, value: bool) -> dict[str, Any]:
         """Latch a binary output on or off with a CROB and confirm the outstation accepted it."""
         if not self.config.writes_enabled:
-            raise DNP3WritesDisabledError("Write operations are disabled (DNP3_WRITES_ENABLED is false)")
+            raise DNP3WritesDisabledError(
+                "Write operations are disabled (DNP3_WRITES_ENABLED is false)",
+                {"outcome": OUTCOME_NOT_SENT, "request_sent": False},
+            )
         _check_outstation(outstation)
         _check_index("index", index)
         if not isinstance(value, bool):
             raise DNP3MasterError(f"value must be a boolean, got {value!r}")
 
         code = "LATCH_ON" if value else "LATCH_OFF"
-        builder = CommandBuilder()
-        if value:
-            builder.latch_on(index)
-        else:
-            builder.latch_off(index)
         mode = self.config.control_mode
         started = time.perf_counter()
         base_meta = {"outstation": outstation, "index": index, "control_code": code, "mode": mode}
+        steps = ("SELECT", "OPERATE") if mode == "select_before_operate" else ("DIRECT_OPERATE",)
+        log = _CallLog()
 
         async with self._lock:
-            session = _Session(self, outstation)
+            session = _Session(self, outstation, log)
             try:
-                await session.open()
-            except DNP3ConnectionError as exc:
-                raise DNP3ControlError(f"{exc}. No control was sent.", base_meta) from exc
-            try:
+                try:
+                    await session.open()
+                except DNP3ConnectionError as exc:
+                    raise DNP3ControlError(
+                        f"{exc}. No control was sent.",
+                        {**base_meta, "outcome": OUTCOME_NOT_SENT, "request_sent": False},
+                    ) from exc
                 iin = IIN(0)
-                if mode == "select_before_operate":
-                    iin |= await self._control_step(
-                        session, session.master.build_select(builder.build_select()), "SELECT", index, base_meta
-                    )
-                    iin |= await self._control_step(
-                        session, session.master.build_operate(builder.build_operate()), "OPERATE", index, base_meta
-                    )
-                else:
-                    iin |= await self._control_step(
-                        session,
-                        session.master.build_direct_operate(builder.build_direct_operate()),
-                        "DIRECT_OPERATE",
-                        index,
-                        base_meta,
-                    )
-            finally:
-                await session.close()
+                try:
+                    for function in steps:
+                        iin |= await self._control_step(session, function, index, value, base_meta)
+                finally:
+                    await session.close()
+            except DNP3MasterError as exc:
+                log.annotate(exc.meta)
+                raise
 
-        meta = {**base_meta, **self._meta(outstation, started, 1), "iin": iin_names(iin), "status": "SUCCESS"}
-        return meta
+        meta = {
+            **base_meta,
+            **self._meta(outstation, started, 1),
+            "iin": iin_names(iin),
+            "status": "SUCCESS",
+            "outcome": OUTCOME_OPERATED,
+            "request_sent": True,
+        }
+        return log.annotate(meta)
 
     def connection_status(self) -> dict[str, Any]:
         cfg = self.config
@@ -438,11 +590,12 @@ class DNP3Master:
         if stop > MAX_POINT_INDEX:
             raise DNP3MasterError(f"start_index + count - 1 must not exceed {MAX_POINT_INDEX}, got {stop}")
 
+        log = _CallLog()
         started = time.perf_counter()
         reply, attempts = await self._read_with_retries(
-            outstation, lambda session: session.master.build_range_poll(group, 0, start, stop)
+            outstation, lambda session: session.master.build_range_poll(group, 0, start, stop), log
         )
-        meta = self._meta(outstation, started, attempts, reply)
+        meta = log.annotate(self._meta(outstation, started, attempts, reply))
         self._raise_for_iin(reply.iin, "READ", meta)
 
         by_index: dict[int, PointValue] = {}
@@ -461,10 +614,15 @@ class DNP3Master:
         return [by_index[i].as_dict() for i in range(start, stop + 1)], meta
 
     async def _read_with_retries(
-        self, outstation: int, build: Callable[[_Session], RequestFragment]
+        self,
+        outstation: int,
+        build: Callable[[_Session], RequestFragment],
+        log: _CallLog,
+        *,
+        protect_solicited: bool = False,
     ) -> tuple[_Reply, int]:
         async def attempt() -> _Reply:
-            session = _Session(self, outstation)
+            session = _Session(self, outstation, log, protect_solicited=protect_solicited)
             await session.open()
             try:
                 return await session.request(build(session))
@@ -472,7 +630,11 @@ class DNP3Master:
                 await session.close()
 
         async with self._lock:
-            return await self._with_retries(attempt)
+            try:
+                return await self._with_retries(attempt)
+            except DNP3MasterError as exc:
+                log.annotate(exc.meta)
+                raise
 
     async def _with_retries(self, operation: Callable[[], Awaitable[T]]) -> tuple[T, int]:
         attempts = 0
@@ -487,42 +649,72 @@ class DNP3Master:
                 logger.warning("%s; retrying (%d of %d)", exc, attempts, self.config.max_retries)
 
     async def _control_step(
-        self, session: _Session, fragment: RequestFragment, function: str, index: int, meta: dict[str, Any]
+        self, session: _Session, function: str, index: int, value: bool, meta: dict[str, Any]
     ) -> IIN:
+        """Send one control request and require a matching SUCCESS echo.
+
+        Every failure carries meta.outcome and meta.request_sent. A SELECT never
+        operates anything, so a failed SELECT is "rejected" when the outstation
+        refused it and "not_sent" otherwise (OPERATE is then not sent). A failed
+        OPERATE / DIRECT_OPERATE is "rejected" when the outstation refused it and
+        "unknown" when it may have acted.
+        """
         acting = function != "SELECT"
         unknown = (
-            "The outstation may or may not have operated the output; read its state before trying again."
+            "The control may have been applied; read the output's state back before retrying."
             if acting
             else "Nothing was operated."
         )
+        unanswered = OUTCOME_UNKNOWN if acting else OUTCOME_NOT_SENT
+        fragment = build_crob_request(function, index, value, session.next_sequence())
+        sent = fragment.objects[0].data[-CROB_SIZE:]
+        # True whenever the request may have reached the outstation.
+        sent_meta = {**meta, "request_sent": True, "failed_step": function}
         try:
             reply = await session.request(fragment)
         except (DNP3TimeoutError, DNP3ConnectionError) as exc:
-            raise DNP3ControlError(f"{function} for binary output {index}: {exc}. {unknown}", dict(meta)) from exc
+            raise DNP3ControlError(
+                f"{function} for binary output {index}: {exc}. {unknown}", {**sent_meta, "outcome": unanswered}
+            ) from exc
         except Exception as exc:  # e.g. a response the library could not parse
             raise DNP3ControlError(
-                f"{function} for binary output {index} failed: {type(exc).__name__}: {exc}. {unknown}", dict(meta)
+                f"{function} for binary output {index} failed: {type(exc).__name__}: {exc}. {unknown}",
+                {**sent_meta, "outcome": unanswered},
             ) from exc
 
-        step_meta = {**meta, "iin": iin_names(reply.iin), "failed_step": function}
+        step_meta = {**sent_meta, "iin": iin_names(reply.iin)}
         if reply.iin & REQUEST_ERROR_IIN:
             rejected = iin_names(reply.iin & REQUEST_ERROR_IIN)
             raise DNP3ControlError(
                 f"Outstation rejected {function} for binary output {index} (IIN {', '.join(rejected)}). "
                 "Nothing was operated.",
-                step_meta,
+                {**step_meta, "outcome": OUTCOME_REJECTED},
             )
-        status = crob_statuses(reply.fragments).get(index)
-        if status is None:
+        echo = crob_echoes(reply.fragments).get(index)
+        if echo is None:
             raise DNP3ControlError(
-                f"{function} response for binary output {index} carried no control status. {unknown}", step_meta
+                f"{function} response for binary output {index} carried no control status. {unknown}",
+                {**step_meta, "outcome": unanswered},
             )
+        if echo[:-1] != sent[:-1]:
+            # IEEE 1815-2012 4.4.3: the response must echo the request's objects.
+            follow = "OPERATE was not sent; nothing was operated." if function == "SELECT" else unknown
+            raise DNP3ControlError(
+                f"{function} response for binary output {index} does not echo the control that was sent. {follow}",
+                {
+                    **step_meta,
+                    "status": "SELECT_MISMATCH" if function == "SELECT" else "ECHO_MISMATCH",
+                    "sent": sent.hex(),
+                    "echoed": echo.hex(),
+                    "outcome": unanswered,
+                },
+            )
+        status = echo[-1] & 0x7F
         if status != CommandStatus.SUCCESS:
             name = command_status_name(status)
-            step_meta["status"] = name
             raise DNP3ControlError(
                 f"Outstation rejected {function} for binary output {index} with status {name}. Nothing was operated.",
-                step_meta,
+                {**step_meta, "status": name, "outcome": OUTCOME_REJECTED},
             )
         return reply.iin
 
@@ -545,5 +737,5 @@ class DNP3Master:
             if warnings:
                 # Say so rather than presenting a partial result as complete.
                 meta["incomplete"] = True
-                meta["warnings"] = warnings
+                meta["warnings"] = list(warnings)
         return meta
