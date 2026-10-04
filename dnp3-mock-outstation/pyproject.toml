@@ -1,13 +1,20 @@
 [project]
 name = "dnp3-mock-outstation"
 version = "0.1.0"
-description = "Mock DNP3 outstation for MCP integration tests."
+description = "Mock DNP3 outstation (DNP3 over TCP) for MCP integration tests."
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "IndustriAgents", email = "hi@industriagents.com" }]
 dependencies = [
-    "anyio>=4.0.0",
-    "rich>=13.7.0",
-    "python-dotenv>=1.1.0",
+    # Same pure-Python DNP3 stack the MCP server's master uses.
+    "dnp3py>=0.6.0,<0.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+    "ruff>=0.6.0",
 ]
 
 [project.scripts]
@@ -16,3 +23,17 @@ dnp3-mock-outstation = "dnp3_mock_outstation:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["dnp3_mock_outstation.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

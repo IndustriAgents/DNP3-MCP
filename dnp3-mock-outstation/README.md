@@ -1,6 +1,9 @@
 # dnp3-mock-outstation
 
-Development outstation for DNP3. Instead of a full protocol stack, the current scaffold exposes a TCP JSON service that mimics point reads, controls, and class polls, as a stand-in for exercising the MCP server locally. The MCP server's master does not connect to it yet; see [Status](../README.md#status).
+Development outstation for the DNP3 MCP server. It is a real DNP3
+(IEEE 1815-2012) outstation over TCP, built on the pure-Python
+[dnp3py](https://pypi.org/project/dnp3py/) stack, so the server's master talks
+to it exactly as it would to a device.
 
 ## Usage
 
@@ -9,16 +12,42 @@ uv sync
 uv run dnp3-mock-outstation
 ```
 
-Defaults:
+Options (each also readable from the environment when the command starts):
 
-- Listens on `127.0.0.1:7300` (`--host` / `--port`, or `MOCK_DNP3_HOST` / `MOCK_DNP3_PORT`)
-- Nudges the simulated analog inputs every second (`--update-interval` or `MOCK_DNP3_UPDATE_INTERVAL`); `--verbose` logs each update
-- Supports newline-delimited JSON commands:
-  - `{ "op": "read", "type": "binary", "start": 0, "count": 8 }`
-  - `{ "op": "read", "type": "analog", "start": 0, "count": 4 }`
-  - `{ "op": "write_binary", "index": 5, "value": true }`
-  - `{ "op": "poll_class", "class": 1 }`
+| Option | Environment | Default |
+|--------|-------------|---------|
+| `--host` | `MOCK_DNP3_HOST` | `127.0.0.1` |
+| `--port` | `MOCK_DNP3_PORT` | `20000` (the server's default `DNP3_PORT`) |
+| `--outstation-address` | `MOCK_DNP3_OUTSTATION_ADDRESS` | `10` |
+| `--update-interval` | `MOCK_DNP3_UPDATE_INTERVAL` | `1.0` seconds; `0` freezes the analogs |
+| `--verbose` | `MOCK_DNP3_VERBOSE` | off; logs every analog update |
 
-Try it by hand with `printf '{"op":"read","type":"analog","start":0,"count":4}\n' | nc -w 1 127.0.0.1 7300`. The mock keeps a connection open until the client closes it, so `-w 1` makes `nc` exit after a second of silence.
+It accepts any master address. Logs go to stderr. `Ctrl-C` or `SIGTERM` stops
+it, also while a master is connected.
 
-Extend `dnp3_mock_outstation.py` later to hook into `pydnp3`, simulate events, unsolicited responses, time synchronization, and file transfer.
+## Points
+
+| Type | Indexes | Behaviour |
+|------|---------|-----------|
+| Binary inputs (group 1) | 0-15 | `true` for odd indexes. They do not change on their own (assigned to Class 1) |
+| Analog inputs (group 30) | 0-7 | Start at their index, then step by -1, 0 or +1 every update interval. Class 2 events (deadband 1). Sent as 32-bit integers (g30v1/g32v1), which is how dnp3py encodes analogs |
+| Binary outputs (group 10) | 0-7 | Start off. LATCH_ON / LATCH_OFF controls (group 12, select-before-operate or direct operate) set them. Other control codes and indexes are answered `NOT_SUPPORTED`. No output events; read their status with a Class 0 poll |
+
+Unsolicited responses are disabled and the outstation does not ask for time
+synchronisation.
+
+## Try it
+
+With the mock running, start the MCP server from `../dnp3-python` with its
+defaults (`DNP3_HOST=127.0.0.1`, `DNP3_PORT=20000`) and call, for example,
+`read_binary_inputs` with `outstation_address=10, start_index=0, count=4`, or
+`poll_class` with `event_class=2` to collect the analog events.
+
+## Tests and checks
+
+```bash
+uv sync --locked
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pytest
+```
