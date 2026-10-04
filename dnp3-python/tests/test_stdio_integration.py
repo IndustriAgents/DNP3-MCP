@@ -283,23 +283,66 @@ async def test_starts_and_answers_without_a_device(closed_port: int, tmp_path: P
         assert read_result["success"] is False and "Could not connect" in read_result["error"]
 
 
-async def test_implicit_env_file_cannot_enable_writes(mock_process: int, tmp_path: Path) -> None:
-    # An MCP client may start the server in an untrusted project directory.
-    (tmp_path / ".env").write_text(f"DNP3_PORT={mock_process}\nDNP3_WRITES_ENABLED=true\n")
-    # An explicit --env-file replaces ./.env and may switch writes on.
-    explicit = tmp_path / "operator.env"
-    explicit.write_text(f"DNP3_PORT={mock_process}\nDNP3_WRITES_ENABLED=true\n")
-    command, args = server_command()
-    for extra, writes in (([], False), (["--env-file", str(explicit)], True)):
-        params = StdioServerParameters(command=command, args=[*args, *extra], env=server_env(), cwd=str(tmp_path))
-        errlog = (tmp_path / "server.err").open("w+")
+# Runs the real CLI with the implicit .env location moved to a test directory,
+# so the test never needs to write dnp3-python/.env itself.
+PROJECT_ENV_WRAPPER = """
+import sys
+from pathlib import Path
+import dnp3_mcp.cli as cli
+location = Path(sys.argv[1])
+cli.project_env_file = lambda module_file=None: location
+cli.main(sys.argv[2:])
+"""
+
+
+async def _ping_and_stderr(params: StdioServerParameters, errlog_path: Path) -> tuple[dict[str, Any], str]:
+    with errlog_path.open("w+") as errlog:
         async with stdio_client(params, errlog=errlog) as (read, write), ClientSession(read, write) as session:
             await session.initialize()
             ping = envelope_of(await session.call_tool("ping", {}))
-            # The connection setting applies either way.
-            assert ping["data"]["connection"]["port"] == mock_process
-            assert ping["data"]["writes_enabled"] is writes
         errlog.seek(0)
-        warned = "ignoring DNP3_WRITES_ENABLED" in errlog.read()
-        errlog.close()
-        assert warned is (not writes)
+        return ping, errlog.read()
+
+
+async def test_implicit_env_file_cannot_enable_writes(mock_process: int, tmp_path: Path) -> None:
+    project = tmp_path / "dnp3-python"
+    project.mkdir()
+    (project / ".env").write_text(f"DNP3_PORT={mock_process}\ndnp3_writes_enabled=true\nPYTHONWARNINGS=error\n")
+
+    # The project .env sets the port, but neither the gate (any case) nor a foreign variable.
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-c", PROJECT_ENV_WRAPPER, str(project / ".env")],
+        env=server_env(),
+        cwd=str(tmp_path),
+    )
+    ping, stderr = await _ping_and_stderr(params, tmp_path / "a.err")
+    assert ping["data"]["connection"]["port"] == mock_process
+    assert ping["data"]["writes_enabled"] is False
+    assert "ignoring dnp3_writes_enabled" in stderr and "ignoring PYTHONWARNINGS" in stderr
+
+    # A .env in the working directory (an MCP client's project) is not read at all.
+    client_project = tmp_path / "client"
+    client_project.mkdir()
+    (client_project / ".env").write_text(f"DNP3_PORT={mock_process}\nDNP3_WRITES_ENABLED=true\n")
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-c", PROJECT_ENV_WRAPPER, str(tmp_path / "nowhere" / ".env")],
+        env=server_env(),
+        cwd=str(client_project),
+    )
+    ping, _ = await _ping_and_stderr(params, tmp_path / "b.err")
+    assert ping["data"]["connection"]["port"] == 20000
+    assert ping["data"]["writes_enabled"] is False
+
+    # An explicit --env-file may switch writes on.
+    explicit = tmp_path / "operator.env"
+    explicit.write_text(f"DNP3_PORT={mock_process}\nDNP3_WRITES_ENABLED=true\n")
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-c", PROJECT_ENV_WRAPPER, str(project / ".env"), "--env-file", str(explicit)],
+        env=server_env(),
+        cwd=str(client_project),
+    )
+    ping, _ = await _ping_and_stderr(params, tmp_path / "c.err")
+    assert ping["data"]["writes_enabled"] is True
