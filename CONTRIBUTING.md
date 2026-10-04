@@ -6,43 +6,45 @@ DNP3 SCADA protocol and a mock outstation to exercise it against.
 ## Where changes land
 
 DNP3 MCP also ships inside the
-[IndustriConnect](https://github.com/IndustriAgents/IndustriConnect) suite as
-the `DNP3-Project` git submodule. That folder is only a pointer to this
-repository, so changes to the DNP3 server or its mock are made **here**: open
-issues and pull requests against `IndustriAgents/DNP3-MCP`, not
+[IndustriConnect](https://github.com/IndustriAgents/IndustriConnect) suite, in
+its `DNP3-Project/` directory, which is being switched to a git submodule that
+points at this repository. Changes to the DNP3 server or its mock are made
+**here**: open issues and pull requests against `IndustriAgents/DNP3-MCP`, not
 IndustriConnect. When `main` moves, a workflow
 (`.github/workflows/notify-industriconnect.yml`) tells IndustriConnect so it
 can bump its submodule pointer.
 
 Changes to the suite itself (`mcp-manager-ui`, the suite README, the submodule
-pins) belong in IndustriConnect. Each other protocol server has its own
-repository; see
-[IndustriConnect's CONTRIBUTING.md](https://github.com/IndustriAgents/IndustriConnect/blob/main/CONTRIBUTING.md#where-a-change-goes).
+pins) belong in IndustriConnect. The other protocol servers are being split
+out into their own repositories the same way; see
+[IndustriConnect's CONTRIBUTING.md](https://github.com/IndustriAgents/IndustriConnect/blob/main/CONTRIBUTING.md)
+for where a change to one of them goes.
 
 ## Repository layout
 
 ```text
 DNP3-MCP/
-├── dnp3-python/             # the MCP server: pyproject.toml + src/dnp3_mcp/, console script `dnp3-mcp`
-├── dnp3-mock-outstation/    # the mock outstation: one module, console script `dnp3-mock-outstation`
+├── dnp3-python/             # the MCP server: pyproject.toml + src/dnp3_mcp/ + tests/, console script `dnp3-mcp`
+├── dnp3-mock-outstation/    # the mock outstation (real DNP3 over TCP): one module + tests/, console script `dnp3-mock-outstation`
 └── README.md                # quickstart, tools, configuration, status
 ```
 
 Each of the two folders is its own [`uv`](https://docs.astral.sh/uv/) project
-with a committed `uv.lock`.
+with a committed `uv.lock`. Both use the pure-Python
+[dnp3py](https://pypi.org/project/dnp3py/) stack: the server as a master, the
+mock as an outstation.
 
 ## What keeps it consistent with the suite
 
 The same three things hold every IndustriConnect server together, and a change
 that breaks one of them needs a reason in the pull request:
 
-1. **One response envelope.** Every tool returns `{ success, data, error, meta }`.
-   A client that can read one server's output can read all of them.
+1. **One response envelope.** Every tool returns `{ success, data, error, meta }`,
+   including for bad arguments. A client that can read one server's output can
+   read all of them.
 2. **Read-only by default.** Tools that operate a control change physical
-   equipment. They are kept separate from the read tools and gated by
-   `DNP3_WRITES_ENABLED`. That variable currently defaults to `true`, which
-   does not match the suite's rule. Changing the default is a welcome
-   contribution.
+   equipment. They are kept separate from the read tools and refused unless
+   `DNP3_WRITES_ENABLED=true`, which is off by default.
 3. **A mock for the protocol.** If you add a tool, the mock has to be able to
    answer it, or nobody can test it without a plant.
 
@@ -53,16 +55,16 @@ git clone https://github.com/IndustriAgents/DNP3-MCP.git
 cd DNP3-MCP
 ```
 
-Run the mock outstation:
+Run the mock outstation (DNP3 on `127.0.0.1:20000`, outstation address `10`):
 
 ```bash
 cd dnp3-mock-outstation
 uv sync
-uv run dnp3-mock-outstation        # 127.0.0.1:7300; --port or MOCK_DNP3_PORT to change
+uv run dnp3-mock-outstation
 ```
 
 In a second terminal, from the repository root, run the MCP server (it speaks
-MCP over stdio and waits for a client):
+MCP over stdio and waits for a client). Its defaults point at the mock:
 
 ```bash
 cd dnp3-python
@@ -70,39 +72,39 @@ uv sync
 uv run dnp3-mcp
 ```
 
-The server's DNP3 master is still a scaffold. It does not connect to the mock,
-or to anything else, yet; see [Status](README.md#status). Wiring the two
-together is the main open piece of work.
-
 ## Testing a change
 
-There is no test suite yet. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
-checks that both projects install from their lockfiles and compile, that the
-server package imports and builds, and that the server starts and answers an
-MCP `initialize`, `tools/list` and `ping`. Run the install, compile and import
-checks locally before opening a pull request. From the repository root:
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the same four
+steps in each project: install from the lockfile, `ruff check`,
+`ruff format --check` and `pytest`. Run them locally before opening a pull
+request. From the repository root:
 
 ```bash
 cd dnp3-python
 uv sync --locked
-uv run --locked python -m compileall -q src
-uv run --locked python -c "from dnp3_mcp import DNP3MCPServer; DNP3MCPServer()"
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pytest
 cd ..
 
 cd dnp3-mock-outstation
 uv sync --locked
-uv run --locked python -m compileall -q dnp3_mock_outstation.py
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pytest
 uv run --locked dnp3-mock-outstation --help
 cd ..
 ```
 
-CI's last server check, the MCP handshake, is a short Python script written
-inline in the `server` job of `ci.yml`. To run it locally, save it to a file
-and run `uv run --locked python <file>` from `dnp3-python/`.
+The server's tests include end-to-end runs: they start
+`dnp3-mock-outstation/dnp3_mock_outstation.py` with the server project's own
+interpreter (it only needs dnp3py, which the server depends on too) and drive
+the `dnp3-mcp` console script over stdio with the MCP client SDK. One of them
+checks that nothing but JSON-RPC is written to stdout.
 
 Then drive the server the way a user would, through the
 [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) or a real
-client. From the repository root:
+client, with the mock running. From the repository root:
 
 ```bash
 cd dnp3-python
@@ -122,9 +124,15 @@ you used.
 
 - MCP speaks over **stdio**, so `stdout` belongs to the protocol. All logging
   goes to `stderr`. A stray `print()` corrupts the session.
+- Read configuration when the server is built (after `.env` is loaded), never
+  at import time.
 - Fail at startup, not at the first tool call, when configuration is unusable.
 - An error is a returned `{ success: false, error }`, not an exception that
   kills the server. The model needs to be told what went wrong.
+- Never report success for something that did not happen, and never return
+  values that did not come from the device.
+- Every tool needs a docstring: it is the description clients see in
+  `tools/list`.
 - Keep tool names and argument names aligned with the other IndustriConnect
   servers.
 
