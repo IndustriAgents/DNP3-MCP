@@ -277,16 +277,20 @@ LISTENING = re.compile(r"DNP3 mock outstation listening on [^:]+:(\d+)")
 
 @pytest.fixture
 def mock_process(tmp_path: Path) -> Iterator[int]:
-    """Run the mock outstation script on an ephemeral port; yield the port."""
+    """Run the mock outstation script on an ephemeral port; yield the port.
+
+    The mock watches its stdin pipe: if pytest is killed, the pipe closes and
+    the mock exits instead of being left running.
+    """
     if not MOCK_PATH.is_file():
         pytest.skip(f"mock outstation not found at {MOCK_PATH}")
     log_path = tmp_path / "mock.log"
     with log_path.open("w") as log:
         proc = subprocess.Popen(
-            [sys.executable, str(MOCK_PATH), "--port", "0", "--update-interval", "0"],
+            [sys.executable, str(MOCK_PATH), "--port", "0", "--update-interval", "0", "--watch-stdin"],
             stdout=log,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
         )
     try:
         deadline = time.monotonic() + 20
@@ -301,6 +305,8 @@ def mock_process(tmp_path: Path) -> Iterator[int]:
                 time.sleep(0.05)
         yield port
     finally:
+        if proc.stdin is not None:
+            proc.stdin.close()
         proc.terminate()
         try:
             proc.wait(timeout=10)

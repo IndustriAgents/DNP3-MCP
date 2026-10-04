@@ -26,6 +26,7 @@ import os
 import random
 import signal
 import sys
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -65,6 +66,7 @@ class MockConfig:
     outstation_address: int = 10
     update_interval: float = 1.0
     verbose: bool = False
+    watch_stdin: bool = False
 
 
 def build_database() -> Database:
@@ -257,6 +259,12 @@ def parse_args(argv: Sequence[str] | None = None, env: Mapping[str, str] | None 
     parser.add_argument(
         "--verbose", action="store_true", default=_env_bool(env, "MOCK_DNP3_VERBOSE"), help="log every update"
     )
+    parser.add_argument(
+        "--watch-stdin",
+        action="store_true",
+        help="stop when stdin reaches end of file, so a test harness that dies (closing the pipe) takes the mock "
+        "with it",
+    )
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535:
         parser.error(f"--port must be 0-65535, got {args.port}")
@@ -270,6 +278,7 @@ def parse_args(argv: Sequence[str] | None = None, env: Mapping[str, str] | None 
         outstation_address=args.outstation_address,
         update_interval=args.update_interval,
         verbose=args.verbose,
+        watch_stdin=args.watch_stdin,
     )
 
 
@@ -282,6 +291,17 @@ async def run_server(config: MockConfig) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop_event.set)
+
+    if config.watch_stdin:
+
+        def wait_for_eof() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                while sys.stdin.buffer.read(4096):
+                    pass
+            logger.info("stdin closed")
+            loop.call_soon_threadsafe(stop_event.set)
+
+        threading.Thread(target=wait_for_eof, name="dnp3-mock-stdin", daemon=True).start()
 
     try:
         await stop_event.wait()

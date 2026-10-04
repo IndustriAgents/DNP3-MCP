@@ -21,6 +21,7 @@ Options (each also readable from the environment when the command starts):
 | `--outstation-address` | `MOCK_DNP3_OUTSTATION_ADDRESS` | `10` |
 | `--update-interval` | `MOCK_DNP3_UPDATE_INTERVAL` | `1.0` seconds; `0` freezes the analogs |
 | `--verbose` | `MOCK_DNP3_VERBOSE` | off; logs every analog update |
+| `--watch-stdin` | | off; stop when stdin reaches end of file, so a test harness that dies (closing the pipe) takes the mock with it |
 
 It accepts any master address. Logs go to stderr. `Ctrl-C` or `SIGTERM` stops
 it, also while a master is connected.

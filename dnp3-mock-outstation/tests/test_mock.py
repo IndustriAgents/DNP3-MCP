@@ -151,3 +151,34 @@ def test_sigterm_stops_promptly_with_a_client_connected(tmp_path: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pipes")
+def test_watch_stdin_stops_the_mock_when_its_parent_goes_away(tmp_path: Path) -> None:
+    log_path = tmp_path / "mock.log"
+    with log_path.open("w") as log:
+        proc = subprocess.Popen(
+            [sys.executable, str(MOCK_PATH), "--port", "0", "--update-interval", "0", "--watch-stdin"],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE,
+        )
+    try:
+        deadline = time.monotonic() + 20
+        while "listening on" not in log_path.read_text():
+            assert proc.poll() is None and time.monotonic() < deadline, log_path.read_text()
+            time.sleep(0.05)
+        assert proc.poll() is None
+        assert proc.stdin is not None
+        proc.stdin.close()  # what the kernel does when the parent dies
+        assert proc.wait(timeout=10) == 0, log_path.read_text()
+        assert "stdin closed" in log_path.read_text()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_watch_stdin_is_off_by_default() -> None:
+    assert parse_args([], env={}).watch_stdin is False
+    assert parse_args(["--watch-stdin"], env={}).watch_stdin is True
