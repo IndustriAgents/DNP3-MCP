@@ -264,3 +264,41 @@ async def test_ping_reports_one_configuration(tmp_path: Path) -> None:
     assert data["server_version"] == version("dnp3-mcp")
     assert data["dnp3_library"] == f"dnp3py {version('dnp3py')}"
     assert master.calls == []
+
+
+async def test_annotations_do_not_invite_retries(tmp_path: Path) -> None:
+    server, _ = build(tmp_path)
+    async with create_connected_server_and_client_session(server.mcp) as session:
+        tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+    for name in ("write_binary_output", "write_point_by_alias", "poll_class"):
+        hints = tools[name].annotations
+        assert hints is not None, name
+        assert (hints.readOnlyHint, hints.destructiveHint, hints.idempotentHint) == (False, True, False), name
+    for name in ("read_binary_inputs", "read_analog_inputs", "read_point_by_alias", "list_points", "ping"):
+        hints = tools[name].annotations
+        assert hints is not None and hints.readOnlyHint is True and hints.destructiveHint is False, name
+    assert "DELETES them on the outstation" in (tools["poll_class"].description or "")
+
+
+@pytest.mark.parametrize(
+    ("alias", "problem"),
+    [("nope", "Unknown alias"), ("broken", "is invalid"), ("breaker", "cannot be written")],
+)
+async def test_alias_write_failures_report_not_sent(tmp_path: Path, alias: str, problem: str) -> None:
+    server, master = build(tmp_path, writes=True, point_map=POINTS)
+    envelope = await call(server, "write_point_by_alias", {"alias": alias, "value": True})
+    assert envelope["success"] is False and problem in envelope["error"]
+    assert (envelope["meta"]["outcome"], envelope["meta"]["request_sent"]) == ("not_sent", False)
+    assert master.calls == []
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("boom"), DNP3MasterError("unclassified")])
+async def test_unclassified_write_failures_are_unknown(tmp_path: Path, failure: Exception) -> None:
+    server, _ = build(tmp_path, writes=True, point_map=POINTS, fail=failure)
+    for tool, args in (
+        ("write_binary_output", {"outstation_address": 10, "index": 3, "value": True}),
+        ("write_point_by_alias", {"alias": "trip", "value": True}),
+    ):
+        envelope = await call(server, tool, args)
+        assert envelope["success"] is False
+        assert (envelope["meta"]["outcome"], envelope["meta"]["request_sent"]) == ("unknown", True), tool

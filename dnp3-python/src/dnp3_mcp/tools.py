@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from pydantic import BeforeValidator, Field, StrictBool, StrictInt
 
 from .config import MAX_LINK_ADDRESS
@@ -198,6 +199,16 @@ class ToolResources:
     library_version: str = "unknown"
 
 
+# Rule: nothing that changes a device may advertise itself as idempotent or harmless.
+READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
+LOCAL_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+WRITES = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
+# A Class 1-3 poll confirms events, and the outstation then deletes them.
+CONSUMES_EVENTS = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
+
+NOT_SENT = {"outcome": "not_sent", "request_sent": False}
+
+
 def register_tools(server: FastMCP, resources: ToolResources) -> None:
     master = resources.master
     point_map = resources.point_map
@@ -206,34 +217,48 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         if not master.config.writes_enabled:
             return err(
                 "Write operations are disabled. Set DNP3_WRITES_ENABLED=true to allow controls.",
-                {"tool": tool, "writes_enabled": False, "outcome": "not_sent", "request_sent": False},
+                {"tool": tool, "writes_enabled": False, **NOT_SENT},
             )
         return None
 
-    async def guarded(tool: str, call: Any) -> dict[str, Any]:
+    async def guarded(tool: str, call: Any, *, write: bool = False) -> dict[str, Any]:
         try:
             return await call()
         except DNP3MasterError as exc:
-            return err(str(exc), {"tool": tool, **exc.meta})
+            meta = {"tool": tool, **exc.meta}
+            if write and "outcome" not in meta:
+                # Not classified where it was raised: assume the worst.
+                meta.update(outcome="unknown", request_sent=True)
+            return err(str(exc), meta)
         except Exception as exc:  # never let an exception reach the client
             logger.exception("Unexpected error in %s", tool)
-            return err(f"Unexpected error: {type(exc).__name__}: {exc}", {"tool": tool})
+            meta = {"tool": tool}
+            message = f"Unexpected error: {type(exc).__name__}: {exc}"
+            if write:
+                # It cannot be known how far the control got.
+                meta.update(outcome="unknown", request_sent=True)
+                message += ". The control may have been applied; read the output's state back before retrying."
+            return err(message, meta)
 
-    def tool(fn: Any) -> Any:
-        # Docstrings become the tool descriptions in tools/list.
-        return server.tool(description=inspect.cleandoc(fn.__doc__ or ""))(fn)
+    def tool(annotations: ToolAnnotations) -> Any:
+        def register(fn: Any) -> Any:
+            # Docstrings become the tool descriptions in tools/list.
+            return server.tool(description=inspect.cleandoc(fn.__doc__ or ""), annotations=annotations)(fn)
 
-    def resolve(alias: str, tool: str) -> PointSpec | dict[str, Any]:
+        return register
+
+    def resolve(alias: str, tool: str, *, write: bool = False) -> PointSpec | dict[str, Any]:
+        extra = dict(NOT_SENT) if write else {}
         spec = point_map.get(alias)
         if spec is None:
             if point_map.error:
-                return err(f"Unknown alias '{alias}'. {point_map.error}", {"tool": tool})
-            return err(f"Unknown alias '{alias}'", {"tool": tool})
+                return err(f"Unknown alias '{alias}'. {point_map.error}", {"tool": tool, **extra})
+            return err(f"Unknown alias '{alias}'", {"tool": tool, **extra})
         if spec.error:
-            return err(f"Point map entry '{alias}' is invalid: {spec.error}", {"tool": tool, "alias": alias})
+            return err(f"Point map entry '{alias}' is invalid: {spec.error}", {"tool": tool, "alias": alias, **extra})
         return spec
 
-    @tool
+    @tool(READ_ONLY)
     async def read_binary_inputs(outstation_address: OutstationAddress, start_index: StartIndex, count: Count) -> dict:
         """Read binary inputs (DNP3 group 1) from an outstation.
 
@@ -251,7 +276,7 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
 
         return await guarded("read_binary_inputs", call)
 
-    @tool
+    @tool(READ_ONLY)
     async def read_analog_inputs(outstation_address: OutstationAddress, start_index: StartIndex, count: Count) -> dict:
         """Read analog inputs (DNP3 group 30) from an outstation.
 
@@ -268,7 +293,7 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
 
         return await guarded("read_analog_inputs", call)
 
-    @tool
+    @tool(WRITES)
     async def write_binary_output(outstation_address: OutstationAddress, index: PointIndex, value: OutputValue) -> dict:
         """Operate a binary output with a DNP3 control relay output block (CROB, group 12).
 
@@ -292,18 +317,22 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
             meta = await master.write_binary_output(outstation_address, index, value)
             return ok({"outstation": outstation_address, "index": index, "value": value}, meta)
 
-        return await guarded("write_binary_output", call)
+        return await guarded("write_binary_output", call, write=True)
 
-    @tool
+    @tool(CONSUMES_EVENTS)
     async def poll_class(outstation_address: OutstationAddress, event_class: EventClass) -> dict:
         """Poll an outstation for Class 0 static data or Class 1/2/3 events.
 
         event_class=0 returns every static point the device reports (inputs,
-        output status, counters). 1, 2 or 3 returns and clears the buffered
-        events of that class. Each entry has its point type, index, value,
+        output status, counters). 1, 2 or 3 returns the buffered events of that
+        class and DELETES them on the outstation (they are confirmed), so other
+        masters sharing the association will not see them; repeating the call
+        does not return them again. Each entry has its point type, index, value,
         quality flags and timestamp if sent. If an event response cannot be
-        fully decoded it is not confirmed and the call fails; for Class 0,
-        meta.incomplete is true and meta.warnings says where decoding stopped.
+        fully decoded that fragment is not confirmed and the call fails, with
+        the events of fragments already confirmed in meta.confirmed_events; for
+        Class 0, meta.incomplete is true and meta.warnings says where decoding
+        stopped.
         Unsolicited data received meanwhile is returned in meta.unsolicited.
         """
 
@@ -313,7 +342,7 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
 
         return await guarded("poll_class", call)
 
-    @tool
+    @tool(LOCAL_ONLY)
     async def list_points() -> dict:
         """List the aliases defined in the point map (POINT_MAP_FILE).
 
@@ -326,7 +355,7 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
             return err(point_map.error, meta)
         return ok({"points": points, "count": len(points)}, meta)
 
-    @tool
+    @tool(READ_ONLY)
     async def read_point_by_alias(alias: Alias) -> dict:
         """Read one binary_input or analog_input point by its point-map alias.
 
@@ -347,7 +376,7 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
             {"tool": "read_point_by_alias", "alias": alias},
         )
 
-    @tool
+    @tool(WRITES)
     async def write_point_by_alias(alias: Alias, value: OutputValue) -> dict:
         """Operate a binary_output point by its point-map alias.
 
@@ -358,17 +387,17 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         refused = writes_refused("write_point_by_alias")
         if refused:
             return refused
-        spec = resolve(alias, "write_point_by_alias")
+        spec = resolve(alias, "write_point_by_alias", write=True)
         if isinstance(spec, dict):
             return spec
         if spec.type != "binary_output":
             return err(
                 f"Alias '{alias}' is a {spec.type}, which cannot be written",
-                {"tool": "write_point_by_alias", "alias": alias},
+                {"tool": "write_point_by_alias", "alias": alias, **NOT_SENT},
             )
         return await write_binary_output(spec.outstation, spec.index, value)
 
-    @tool
+    @tool(LOCAL_ONLY)
     async def ping() -> dict:
         """Report the server's configuration: connection settings, write switch and point map.
 
