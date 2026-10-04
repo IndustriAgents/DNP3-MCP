@@ -57,7 +57,11 @@ pure-Python dnp3py stack). What that means for security:
   "unknown"` and says the control may have been applied. Only a refusal status
   in the echo counts as `rejected`. Controls are never retried automatically,
   a SELECT that is not answered correctly is never followed by an OPERATE, and
-  every call has an overall deadline, so none can hang without an outcome.
+  every call has an overall deadline that starts when the call is made and
+  covers waiting behind earlier calls, so none can hang without an outcome,
+  and a control whose deadline passes while it waits is reported `not_sent`
+  and never sent afterwards (an MCP client that times out sends no
+  cancellation, so this deadline is what stops it).
 - **A cancelled or abandoned control stays unsent.** If the MCP client cancels
   a control, or disconnects (closes stdin), while it is queued, connecting or
   between SELECT and OPERATE, no OPERATE or DIRECT_OPERATE is sent afterwards:

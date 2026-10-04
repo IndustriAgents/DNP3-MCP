@@ -277,6 +277,11 @@ async def test_annotations_do_not_invite_retries(tmp_path: Path) -> None:
     for name in ("read_binary_inputs", "read_analog_inputs", "read_point_by_alias", "list_points", "ping"):
         hints = tools[name].annotations
         assert hints is not None and hints.readOnlyHint is True and hints.destructiveHint is False, name
+    # Device reads confirm (so delete) any unsolicited data that arrives meanwhile.
+    for name in ("read_binary_inputs", "read_analog_inputs", "read_point_by_alias"):
+        assert tools[name].annotations.idempotentHint is False, name
+    for name in ("list_points", "ping"):  # local only
+        assert tools[name].annotations.idempotentHint is True, name
     assert "DELETES them on the outstation" in (tools["poll_class"].description or "")
 
 

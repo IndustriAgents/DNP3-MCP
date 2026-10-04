@@ -140,7 +140,11 @@ the device sent one.
 
 Tool annotations say which tools change something: the two write tools and
 `poll_class` are marked destructive and not idempotent; the read tools,
-`list_points` and `ping` are marked read-only.
+`list_points` and `ping` are marked read-only. The device read tools
+(`read_binary_inputs`, `read_analog_inputs`, `read_point_by_alias`) are also
+marked not idempotent: they change no point, but any unsolicited data the
+outstation pushes while they run is confirmed, which deletes those events on
+the outstation (they are returned in `meta.unsolicited`).
 
 Controls put the result in `meta` as well as in the text:
 
@@ -199,7 +203,7 @@ instead.
 | `DNP3_PORT` | `20000` | Outstation TCP port |
 | `DNP3_MASTER_ADDRESS` | `1` | This master's DNP3 link address (0-65519). `1` is a common production value too: against real equipment, use an address of its own (see [SECURITY.md](SECURITY.md)) |
 | `DNP3_LOCAL_ADDRESS` | unset | Old name for `DNP3_MASTER_ADDRESS`; used only when that is unset, and an error if the two differ |
-| `DNP3_TIMEOUT` | `5000` | Milliseconds; bounds the TCP connect and each request/response exchange. A whole call is also bounded: reads and polls by 2 x timeout x (retries + 1) + 2 s, controls by 3 x timeout + 2 s (42 s and 17 s with the defaults, so the server rather than a client's 60 s timeout decides the outcome); past that, a read fails cleanly and a control reports `unknown` (or `rejected` during SELECT, `not_sent` before anything was sent) |
+| `DNP3_TIMEOUT` | `5000` | Milliseconds; bounds the TCP connect and each request/response exchange. A whole call is also bounded by one absolute deadline, set when the call is made and shared by everything the call does: waiting for earlier calls to finish (calls run one at a time), connecting, SELECT and OPERATE, and every retry of a read or poll; it is never restarted per step, and a request due after it is refused rather than sent: reads and polls by 2 x timeout x (retries + 1) + 2 s, controls by 3 x timeout + 2 s (42 s and 17 s with the defaults, so the server rather than a client's 60 s timeout decides the outcome; the MCP SDK client sends no cancellation when its own timeout fires). Past that, a read fails cleanly, and a control reports `not_sent` if it was still waiting or connecting (it is then never sent later), `rejected` during SELECT, or `unknown` once an OPERATE may have left |
 | `DNP3_MAX_RETRIES` | `3` | Extra attempts for reads and polls after a connection failure or timeout (0-10). Controls are never retried |
 | `DNP3_CONTROL_MODE` | `select_before_operate` | Or `direct_operate` |
 | `DNP3_WRITES_ENABLED` | `false` | `true` allows `write_binary_output` and `write_point_by_alias`. Only true/false spellings (`true`, `1`, `yes`, `on` / `false`, `0`, `no`, `off`) are accepted. Read only from the real environment or an explicit `--env-file`, never from the implicit `.env` |
@@ -266,8 +270,10 @@ LATCH_ON/LATCH_OFF. See
   returned in `meta.unsolicited`. The outstation's `DEVICE_RESTART` indication
   is not cleared by the server (it shows up in `meta.iin`).
 - **Every call is bounded.** Besides dnp3py's own per-exchange timeout, each
-  call has an overall deadline (see `DNP3_TIMEOUT`), so a peer that answers
-  garbage cannot leave a call hanging without an outcome.
+  call has an overall deadline (see `DNP3_TIMEOUT`) that also covers waiting
+  behind earlier calls, so neither a peer that answers garbage nor a queue of
+  slow calls can leave a call hanging without an outcome, and a control whose
+  deadline passes while it waits is never sent.
 - **Library coverage.** Responses are decoded by dnp3py. If a response holds an
   object it cannot size (opendnp3 includes group 50 variation 4 in its Class 0
   response, for example), the rest of that fragment is skipped. For Class 0 the

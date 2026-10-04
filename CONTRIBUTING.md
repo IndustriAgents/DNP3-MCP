@@ -155,7 +155,10 @@ you used.
   from the real environment or an explicit `--env-file`.
 - A write reaches the device at most once. Only (re)connecting may be retried;
   once a control may have gone out, a lost reply is reported with
-  `meta.outcome: "unknown"`, not retried. Every call has an overall deadline.
+  `meta.outcome: "unknown"`, not retried. Every tool call has one absolute
+  deadline, set when it starts and shared by the lock wait, the connect,
+  SELECT, OPERATE and every read retry; never restart it per step, and check
+  the clock against it (not only a checkpoint) right before each send.
   Check for cancellation and for the client having gone (`DNP3Master.closing`)
   immediately before every send; dnp3py writes a frame before its first
   await, so a pending cancellation alone does not stop it.

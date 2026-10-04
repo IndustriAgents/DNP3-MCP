@@ -200,7 +200,9 @@ class ToolResources:
 
 
 # Rule: nothing that changes a device may advertise itself as idempotent or harmless.
-READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
+# Device reads change no point, but any unsolicited data that arrives while they run is
+# confirmed (and so deleted on the outstation, returned in meta.unsolicited): not idempotent.
+READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True)
 LOCAL_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 WRITES = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 # A Class 1-3 poll confirms events, and the outstation then deletes them.
