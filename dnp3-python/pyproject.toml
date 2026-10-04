@@ -5,19 +5,22 @@ description = "Model Context Protocol server for DNP3 SCADA networks."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "IndustriConnect" }]
+authors = [{ name = "IndustriAgents", email = "hi@industriagents.com" }]
 dependencies = [
     "anyio>=4.0.0",
-    "mcp[cli]>=1.6.0",
+    # Pure-Python DNP3 (IEEE 1815-2012) master and outstation. Pinned to a
+    # minor series because the master decodes control echoes from its parsed
+    # fragments; re-test before widening.
+    "dnp3py>=0.6.0,<0.7",
+    # mcp 2.x renamed FastMCP and changed its API; this server targets 1.x.
+    "mcp[cli]>=1.22.0,<2",
     "pydantic>=2.6.0",
     "python-dotenv>=1.1.0",
-    "pyserial>=3.5",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest>=8.2.0",
-    "pytest-asyncio>=0.23.0",
     "ruff>=0.6.0",
 ]
 
@@ -27,3 +30,14 @@ dnp3-mcp = "dnp3_mcp.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

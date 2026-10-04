@@ -2,49 +2,84 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from typing import AsyncIterator
+from collections.abc import Sequence
+from importlib.metadata import PackageNotFoundError, version
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ContentBlock
+from pydantic import ValidationError
 
+from .config import ServerConfig
 from .dnp3_master import DNP3Master
-from .tools import PointMap, ToolConfig, ToolResources, register_tools
+from .tools import PointMap, ToolResources, err, register_tools
 
 
-@dataclass(slots=True)
-class AppContext:
-    master: DNP3Master
+def _package_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "unknown"
+
+
+__version__ = _package_version("dnp3-mcp")
+
+INSTRUCTIONS = (
+    "Tools for a DNP3 (IEEE 1815) master over TCP. Every tool returns {success, data, error, meta}. "
+    "Controls are refused unless DNP3_WRITES_ENABLED=true."
+)
+
+
+def describe_validation_error(tool: str, exc: ValidationError) -> str:
+    problems = []
+    for error in exc.errors():
+        where = ".".join(str(part) for part in error.get("loc", ())) or "arguments"
+        problems.append(f"{where}: {error.get('msg', 'invalid')}")
+    return f"Invalid arguments for {tool}: " + "; ".join(problems)
+
+
+class EnvelopeFastMCP(FastMCP):
+    """FastMCP that reports argument validation errors in the response envelope.
+
+    FastMCP validates arguments against the tool signature before the tool
+    runs, and by default answers a bad argument with a bare protocol error.
+    Here it becomes a normal {success: false} envelope like any other failure.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Sequence[ContentBlock] | dict[str, Any]:
+        try:
+            return await super().call_tool(name, arguments)
+        except ToolError as exc:
+            if isinstance(exc.__cause__, ValidationError):
+                return err(describe_validation_error(name, exc.__cause__), {"tool": name})
+            raise
 
 
 class DNP3MCPServer:
-    def __init__(
-        self,
-        master: DNP3Master | None = None,
-        tool_config: ToolConfig | None = None,
-    ) -> None:
-        self.master = master or DNP3Master()
-        self.tool_config = tool_config or ToolConfig.from_env()
-        self.point_map = PointMap(self.tool_config.point_map_path)
-        self._server = FastMCP(
-            name="DNP3 MCP Server",
-            dependencies=[],
-            lifespan=self._lifespan,
+    def __init__(self, config: ServerConfig | None = None, *, master: DNP3Master | None = None) -> None:
+        # Read the environment here, not at import time, so .env values loaded
+        # by cli.main() apply.
+        self.config = config or ServerConfig.from_env()
+        self.master = master or DNP3Master(self.config.dnp3)
+        self._server = EnvelopeFastMCP(name="DNP3 MCP Server", instructions=INSTRUCTIONS)
+        # FastMCP has no version argument and would report the mcp SDK's own
+        # version as serverInfo.version.
+        self._server._mcp_server.version = __version__
+        self.point_map = PointMap(self.config.point_map_path)
+        register_tools(
+            self._server,
+            ToolResources(
+                master=self.master,
+                point_map=self.point_map,
+                server_version=__version__,
+                library_version=_package_version("dnp3py"),
+            ),
         )
-        resources = ToolResources(
-            master=self.master,
-            config=self.tool_config,
-            point_map=self.point_map,
-        )
-        register_tools(self._server, resources)
+
+    @property
+    def mcp(self) -> FastMCP:
+        return self._server
 
     def run(self) -> None:
         self._server.run()
-
-    @asynccontextmanager
-    async def _lifespan(self, server: FastMCP) -> AsyncIterator[AppContext]:  # noqa: ARG002
-        await self.master.ensure_open()
-        try:
-            yield AppContext(master=self.master)
-        finally:
-            await self.master.close()
