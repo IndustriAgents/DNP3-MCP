@@ -107,6 +107,13 @@ class ServerConfig:
             )
         if connection_type != "tcp":
             raise ConfigError(f"DNP3_CONNECTION_TYPE={connection_type!r} is not supported; use tcp")
+        serial_port = env.get("DNP3_SERIAL_PORT")
+        if serial_port is not None and serial_port.strip():
+            # Setting it alone must not quietly start a TCP master instead.
+            raise ConfigError(
+                f"DNP3_SERIAL_PORT={serial_port!r} is set, but serial is not implemented; only tcp is supported. "
+                "Unset DNP3_SERIAL_PORT and point DNP3_HOST/DNP3_PORT at a serial-to-TCP gateway."
+            )
 
         host = (env.get("DNP3_HOST") or "127.0.0.1").strip()
         port = parse_int("DNP3_PORT", env.get("DNP3_PORT"), 20000, minimum=1, maximum=65535)

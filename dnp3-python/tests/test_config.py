@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from dotenv import dotenv_values
 
 from dnp3_mcp.config import ConfigError, ServerConfig, parse_bool
 
@@ -85,6 +86,12 @@ def test_serial_is_reported_as_not_implemented() -> None:
         ServerConfig.from_env({"DNP3_CONNECTION_TYPE": "serial", "DNP3_SERIAL_PORT": "/dev/ttyUSB0"})
 
 
+def test_serial_port_alone_is_an_error_not_a_silent_tcp_master() -> None:
+    with pytest.raises(ConfigError, match="DNP3_SERIAL_PORT"):
+        ServerConfig.from_env({"DNP3_SERIAL_PORT": "/dev/ttyUSB0"})
+    assert ServerConfig.from_env({"DNP3_SERIAL_PORT": "  "}).dnp3.connection_type == "tcp"
+
+
 def test_local_address_is_an_alias_for_master_address() -> None:
     assert ServerConfig.from_env({"DNP3_LOCAL_ADDRESS": "7"}).dnp3.master_address == 7
     same = {"DNP3_LOCAL_ADDRESS": "7", "DNP3_MASTER_ADDRESS": "7"}
@@ -99,3 +106,11 @@ def test_conflicting_local_and_master_address_is_an_error() -> None:
 def test_point_map_path_is_expanded() -> None:
     config = ServerConfig.from_env({"POINT_MAP_FILE": "~/points.json"})
     assert config.point_map_path == Path("~/points.json").expanduser()
+
+
+def test_env_example_is_valid_and_read_only() -> None:
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    values = {k: v for k, v in dotenv_values(example).items() if v is not None}
+    config = ServerConfig.from_env(values)
+    assert config.writes_enabled is False
+    assert "DNP3_WRITES_ENABLED" not in values  # documented, but commented out

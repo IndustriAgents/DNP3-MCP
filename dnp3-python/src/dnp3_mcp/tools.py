@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BeforeValidator, Field
+from pydantic import BeforeValidator, Field, StrictBool, StrictInt
 
 from .config import MAX_LINK_ADDRESS
 from .dnp3_master import MAX_POINT_INDEX, MAX_READ_COUNT, DNP3Master, DNP3MasterError
@@ -37,48 +37,44 @@ def err(message: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
     return envelope(False, error=message, meta=meta)
 
 
-def _reject_bool(value: Any) -> Any:
-    # JSON true/false would otherwise be accepted as 1/0. Keep this validator
-    # after Field(...) in the Annotated metadata: placed before it, pydantic
-    # emits "ge"/"le" instead of JSON Schema "minimum"/"maximum".
-    if isinstance(value, bool):
-        raise ValueError("expected an integer, not a boolean")
-    return value
-
-
+# Strict integers: JSON booleans, numeric strings ("10") and floats (10.0) are
+# rejected rather than coerced into an address or index.
 OutstationAddress = Annotated[
-    int,
+    StrictInt,
     Field(ge=0, le=MAX_LINK_ADDRESS, description=f"DNP3 link address of the outstation (0-{MAX_LINK_ADDRESS})."),
-    BeforeValidator(_reject_bool),
 ]
-StartIndex = Annotated[
-    int,
-    Field(ge=0, le=MAX_POINT_INDEX, description="First point index to read."),
-    BeforeValidator(_reject_bool),
-]
-PointIndex = Annotated[
-    int,
-    Field(ge=0, le=MAX_POINT_INDEX, description="Point index of the binary output."),
-    BeforeValidator(_reject_bool),
-]
+StartIndex = Annotated[StrictInt, Field(ge=0, le=MAX_POINT_INDEX, description="First point index to read.")]
+PointIndex = Annotated[StrictInt, Field(ge=0, le=MAX_POINT_INDEX, description="Point index of the binary output.")]
 Count = Annotated[
-    int,
+    StrictInt,
     Field(ge=1, le=MAX_READ_COUNT, description=f"Number of consecutive points to read (1-{MAX_READ_COUNT})."),
-    BeforeValidator(_reject_bool),
 ]
 EventClass = Annotated[
-    int,
+    StrictInt,
     Field(ge=0, le=3, description="0 reads all static data (Class 0); 1, 2 or 3 reads that event class."),
-    BeforeValidator(_reject_bool),
 ]
+
+
+def _output_value(value: Any) -> Any:
+    # Only a JSON boolean or the words "true"/"false" (any case). Numbers and
+    # other words ("off", "yes", 1) are rejected rather than guessed: this
+    # value switches physical equipment.
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise ValueError('expected a JSON boolean, or the string "true" or "false"')
+
+
 OutputValue = Annotated[
-    bool,
+    StrictBool,
     Field(
         description=(
             "true latches the output ON, false latches it OFF. Pass a JSON boolean; "
-            'the strings "true" and "false" are also understood, anything unrecognised is rejected.'
+            'the strings "true" and "false" are also accepted. Anything else is rejected.'
         )
     ),
+    BeforeValidator(_output_value),
 ]
 Alias = Annotated[str, Field(min_length=1, max_length=256, description="Alias defined in the point map.")]
 
@@ -210,7 +206,7 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         if not master.config.writes_enabled:
             return err(
                 "Write operations are disabled. Set DNP3_WRITES_ENABLED=true to allow controls.",
-                {"tool": tool, "writes_enabled": False},
+                {"tool": tool, "writes_enabled": False, "outcome": "not_sent", "request_sent": False},
             )
         return None
 
@@ -245,6 +241,8 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         connection to DNP3_HOST:DNP3_PORT. Each point has its value, its flag
         octet, the decoded quality flags and a timestamp when the device sent
         one. Fails if the outstation does not return every requested index.
+        Any unsolicited data the outstation pushes meanwhile is confirmed (so it
+        is removed from the outstation) and returned in meta.unsolicited.
         """
 
         async def call() -> dict[str, Any]:
@@ -260,7 +258,8 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         Reads indexes start_index to start_index + count - 1 over a fresh TCP
         connection to DNP3_HOST:DNP3_PORT. Values are returned as the device
         encodes them (integer or floating point variations, unscaled). Fails if
-        the outstation does not return every requested index.
+        the outstation does not return every requested index. Unsolicited data
+        received meanwhile is returned in meta.unsolicited.
         """
 
         async def call() -> dict[str, Any]:
@@ -276,9 +275,14 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         value=true sends LATCH_ON, value=false sends LATCH_OFF, using
         select-before-operate unless DNP3_CONTROL_MODE=direct_operate. Refused
         unless DNP3_WRITES_ENABLED=true. Succeeds only when the outstation
-        answers with control status SUCCESS; any other status, a timeout or a
-        dropped link is reported as a failure, and the error says whether the
-        output may have changed.
+        answers with control status SUCCESS and echoes the control unchanged;
+        any other status, a mismatched echo, a timeout or a dropped link is
+        reported as a failure, and the error says whether the output may have
+        changed. meta.outcome is "operated", "rejected", "not_sent" (no OPERATE
+        or DIRECT_OPERATE was sent) or "unknown" (it may have acted; read the
+        output before retrying), and meta.request_sent says whether any control
+        request may have reached the outstation. Unsolicited data received
+        meanwhile is in meta.unsolicited.
         """
         refused = writes_refused("write_binary_output")
         if refused:
@@ -297,9 +301,10 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         event_class=0 returns every static point the device reports (inputs,
         output status, counters). 1, 2 or 3 returns and clears the buffered
         events of that class. Each entry has its point type, index, value,
-        quality flags, timestamp if sent, and whether it arrived unsolicited.
-        If part of the response could not be decoded, meta.incomplete is true
-        and meta.warnings says where decoding stopped.
+        quality flags and timestamp if sent. If an event response cannot be
+        fully decoded it is not confirmed and the call fails; for Class 0,
+        meta.incomplete is true and meta.warnings says where decoding stopped.
+        Unsolicited data received meanwhile is returned in meta.unsolicited.
         """
 
         async def call() -> dict[str, Any]:

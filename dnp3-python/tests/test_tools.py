@@ -121,6 +121,7 @@ async def test_writes_are_refused_by_default(tmp_path: Path) -> None:
         envelope = await call(server, tool, args)
         assert envelope["success"] is False
         assert "DNP3_WRITES_ENABLED" in envelope["error"]
+        assert (envelope["meta"]["outcome"], envelope["meta"]["request_sent"]) == ("not_sent", False)
     assert master.calls == []
     ping = await call(server, "ping", {})
     assert ping["data"]["writes_enabled"] is False
@@ -128,7 +129,7 @@ async def test_writes_are_refused_by_default(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(True, True), (False, False), ("false", False), ("False", False), ("0", False), ("true", True), (0, False)],
+    [(True, True), (False, False), ("false", False), ("False", False), (" TRUE ", True), ("true", True)],
 )
 async def test_write_value_is_parsed_strictly(tmp_path: Path, raw: Any, expected: bool) -> None:
     server, master = build(tmp_path, writes=True, point_map=POINTS)
@@ -138,7 +139,7 @@ async def test_write_value_is_parsed_strictly(tmp_path: Path, raw: Any, expected
     assert master.calls == [("write_binary_output", (10, 3, expected))] * 2
 
 
-@pytest.mark.parametrize("raw", ["banana", "", 2, None, [True]])
+@pytest.mark.parametrize("raw", ["banana", "", "off", "on", "yes", "no", "0", "1", 0, 1, 2, 1.0, None, [True]])
 async def test_unrecognised_write_value_is_rejected(tmp_path: Path, raw: Any) -> None:
     server, master = build(tmp_path, writes=True, point_map=POINTS)
     for tool, args in (
@@ -181,11 +182,13 @@ async def test_bad_event_class_is_rejected(tmp_path: Path) -> None:
     assert master.calls == []
 
 
-async def test_numeric_strings_are_accepted_for_integers(tmp_path: Path) -> None:
+@pytest.mark.parametrize("raw", ["10", 10.0, True, "ten"])
+async def test_integers_are_strict(tmp_path: Path, raw: Any) -> None:
     server, master = build(tmp_path)
-    envelope = await call(server, "read_analog_inputs", {"outstation_address": "10", "start_index": "2", "count": "1"})
-    assert envelope["success"] is True
-    assert master.calls == [("read_analog_inputs", (10, 2, 1))]
+    envelope = await call(server, "read_analog_inputs", {"outstation_address": raw, "start_index": 2, "count": 1})
+    assert envelope["success"] is False
+    assert envelope["error"].startswith("Invalid arguments for read_analog_inputs: outstation_address")
+    assert master.calls == []
 
 
 async def test_aliases_route_to_the_right_point(tmp_path: Path) -> None:
