@@ -21,19 +21,37 @@ pure-Python dnp3py stack). What that means for security:
 
 - **Reads are real.** Each read or poll opens a TCP connection to `DNP3_HOST` /
   `DNP3_PORT` and returns what the outstation sent. Class 1-3 polls confirm
-  events, which removes them from the outstation's buffer.
+  events, which removes them from the outstation's buffer, unless the response
+  could not be fully decoded: then nothing is confirmed and the call fails.
+- **Unsolicited data is confirmed.** The server does not enable unsolicited
+  reporting, but any unsolicited response the outstation sends during a call is
+  confirmed (removing those events from the outstation) and returned in
+  `meta.unsolicited`. It does not send DISABLE_UNSOLICITED or anything else that
+  changes the outstation's configuration.
 - **Controls are off by default.** `DNP3_WRITES_ENABLED` defaults to `false`,
   and `write_binary_output` / `write_point_by_alias` are refused until it is
   set to `true`. Only recognised true/false spellings are accepted; anything
-  else stops the server at startup, so a typo cannot switch writes on.
+  else stops the server at startup, so a typo cannot switch writes on. The
+  switch is read only from the real process environment or an explicit
+  `--env-file`. A `.env` found in the working directory may set connection
+  settings, but if it sets `DNP3_WRITES_ENABLED` the server logs a warning on
+  stderr and ignores it: when an MCP client starts the server, the working
+  directory can be the client's project, which may not be trusted.
 - **Controls are real when enabled.** A control sends a CROB (LATCH_ON or
   LATCH_OFF) using select-before-operate unless `DNP3_CONTROL_MODE=direct_operate`.
-  It is reported as successful only when the outstation answers with status
-  `SUCCESS`. If the link fails or times out after the OPERATE (or
-  DIRECT_OPERATE) was sent, the error says the output may or may not have
-  changed. Controls are never retried automatically.
+  It is reported as successful only when the outstation echoes the control
+  unchanged with status `SUCCESS`. If the link fails or times out after the
+  OPERATE (or DIRECT_OPERATE) was sent, the call reports `meta.outcome:
+  "unknown"` and says the control may have been applied. Controls are never
+  retried automatically, and a SELECT that is not answered correctly is never
+  followed by an OPERATE.
 - **No authentication or encryption.** DNP3 Secure Authentication and TLS are
   not implemented. Serial links are not supported.
+- **The protocol stack is young.** DNP3 is handled by dnp3py, a 0.x beta from a
+  single maintainer, pinned to one release. The server encodes controls itself
+  and withholds confirmations for partly decoded event data because of known
+  dnp3py defects, and CI checks it against opendnp3. See
+  [About dnp3py](README.md#about-dnp3py).
 
 ## Running it safely
 
@@ -43,7 +61,19 @@ pure-Python dnp3py stack). What that means for security:
 - **Keep it read-only until you mean otherwise.** Control relay outputs open
   breakers, start pumps and move valves. There is no undo, and a language
   model will call a tool it has been given. Leave `DNP3_WRITES_ENABLED` unset
-  (or `false`) and both write tools are refused.
+  (or `false`) and both write tools are refused. Set it only in the MCP
+  client's `env` block or an explicit `--env-file`.
+- **Give it an association of its own.** Configure the outstation with a
+  dedicated master address and association for this server, and set
+  `DNP3_MASTER_ADDRESS` to it. Never reuse the production SCADA master's
+  address: the default, `1`, is a common production value (it is kept as the
+  default because it is what the mock and most test outstations expect, not
+  because it is safe on a live system). Sharing an address lets this server
+  consume the production master's events and confuse its sequence numbers.
+- **Expect connection contention.** The server opens one TCP connection per
+  call. An outstation that allows a single master connection may refuse it, or
+  drop the connection the production master already has. Check how your
+  device behaves before connecting.
 - **Do not expose the server beyond the host running the client.** It is a
   stdio process meant to run beside the MCP client, not a network service.
 - **Segment the network.** The server should sit where a SCADA engineering

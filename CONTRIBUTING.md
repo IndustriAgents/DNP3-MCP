@@ -100,7 +100,31 @@ The server's tests include end-to-end runs: they start
 `dnp3-mock-outstation/dnp3_mock_outstation.py` with the server project's own
 interpreter (it only needs dnp3py, which the server depends on too) and drive
 the `dnp3-mcp` console script over stdio with the MCP client SDK. One of them
-checks that nothing but JSON-RPC is written to stdout.
+runs the server unbuffered, calls every tool and checks that nothing but
+JSON-RPC is written to stdout. `tests/test_protocol.py` uses a scripted
+outstation to pin down the wire behaviour (control encoding, confirmations,
+unsolicited data).
+
+CI also runs two more jobs:
+
+- **Interop with opendnp3.** `tests/interop` runs the master against an
+  opendnp3 outstation (the `yadnp3` bindings) and an opendnp3 master against the
+  mock. yadnp3 has wheels for Linux x86_64 only, so locally these tests are
+  skipped elsewhere. On Linux x86_64 (or in a container):
+
+  ```bash
+  cd dnp3-python
+  uv sync --locked --group interop
+  REQUIRE_OPENDNP3=1 uv run --locked --group interop pytest tests/interop
+  ```
+
+- **Lowest declared dependencies.** Each project is installed with every
+  direct dependency at exactly its declared lower bound, and the tests run
+  again. If you raise or add a dependency, keep its floor at a version the
+  tests pass on.
+
+Safety tests must be able to fail: when you add one, check that it fails with
+the protection removed.
 
 Then drive the server the way a user would, through the
 [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) or a real
@@ -125,7 +149,12 @@ you used.
 - MCP speaks over **stdio**, so `stdout` belongs to the protocol. All logging
   goes to `stderr`. A stray `print()` corrupts the session.
 - Read configuration when the server is built (after `.env` is loaded), never
-  at import time.
+  at import time. Safety switches (`DNP3_WRITES_ENABLED`) are never taken from
+  an implicitly discovered `.env`, only from the real environment or an
+  explicit `--env-file`.
+- A write reaches the device at most once. Only (re)connecting may be retried;
+  once a control may have gone out, a lost reply is reported with
+  `meta.outcome: "unknown"`, not retried.
 - Fail at startup, not at the first tool call, when configuration is unusable.
 - An error is a returned `{ success: false, error }`, not an exception that
   kills the server. The model needs to be told what went wrong.

@@ -33,6 +33,8 @@ DNP3-MCP/                    # shipped inside IndustriConnect as DNP3-Project/
 - A DNP3 master over TCP built on [dnp3py](https://pypi.org/project/dnp3py/),
   a pure-Python IEEE 1815-2012 stack (no native dependencies). Every tool call
   opens a connection, resets the link, runs its exchange and closes again.
+  dnp3py is young (a 0.x beta from a single maintainer); see
+  [About dnp3py](#about-dnp3py) for what that means and how it is contained.
 - Tools for binary and analog input reads, binary output controls
   (select-before-operate or direct operate), Class 0/1/2/3 polls and a `ping`
   diagnostic, all returning the suite's `{ success, data, error, meta }`
@@ -40,7 +42,8 @@ DNP3-MCP/                    # shipped inside IndustriConnect as DNP3-Project/
 - Honest results: values come from the outstation during the call; a read that
   is missing an index, a control the outstation rejects, a timeout or a broken
   link all come back as `success: false` with a reason. Bad arguments come
-  back the same way.
+  back the same way. Controls also report `meta.outcome` (`operated`,
+  `rejected`, `not_sent` or `unknown`) and `meta.request_sent`.
 - Point-map aliasing: give points friendly names in a JSON file and read or
   write them by alias.
 - A mock outstation with 16 binary inputs, 8 analog inputs and 8 binary
@@ -48,8 +51,8 @@ DNP3-MCP/                    # shipped inside IndustriConnect as DNP3-Project/
 
 Not implemented: serial links (use a serial-to-TCP gateway), DNP3 Secure
 Authentication, TLS, counters and analog outputs as dedicated tools (they do
-appear in Class 0 polls), time synchronisation, file transfer and unsolicited
-reporting.
+appear in Class 0 polls), time synchronisation, file transfer, and enabling
+unsolicited reporting.
 
 ## Install
 
@@ -120,44 +123,78 @@ npx @modelcontextprotocol/inspector uv run dnp3-mcp
 |------|-----------|--------------|
 | `read_binary_inputs` | `outstation_address`, `start_index`, `count` | READ group 1 for the range; fails if any index is missing |
 | `read_analog_inputs` | `outstation_address`, `start_index`, `count` | READ group 30 for the range; fails if any index is missing |
-| `write_binary_output` | `outstation_address`, `index`, `value` | CROB LATCH_ON (`true`) or LATCH_OFF (`false`); refused unless `DNP3_WRITES_ENABLED=true`; succeeds only on status `SUCCESS` |
-| `poll_class` | `outstation_address`, `event_class` | `0`: all static data; `1`-`3`: that event class (events are confirmed and cleared on the outstation) |
+| `write_binary_output` | `outstation_address`, `index`, `value` | CROB LATCH_ON (`true`) or LATCH_OFF (`false`) on index 0-65535; refused unless `DNP3_WRITES_ENABLED=true`; succeeds only when the outstation echoes the control unchanged with status `SUCCESS` |
+| `poll_class` | `outstation_address`, `event_class` | `0`: all static data; `1`-`3`: that event class (the events are confirmed, which clears them on the outstation; a response that cannot be fully decoded is not confirmed and the call fails) |
 | `list_points` | none | Lists the point-map aliases, flagging invalid entries |
 | `read_point_by_alias` | `alias` | Reads a `binary_input` or `analog_input` alias |
 | `write_point_by_alias` | `alias`, `value` | Operates a `binary_output` alias; same gate and checks as `write_binary_output` |
 | `ping` | none | Configuration only (connection settings, write switch, point map, versions); does not contact an outstation |
 
-`count` is 1-1000. `value` must be a JSON boolean; the strings `"true"` and
-`"false"` are also understood, and anything else is rejected rather than
-guessed. Each point comes back as `{ index, value, flags, quality, timestamp }`,
-where `quality` lists the flag names (for example `ONLINE`) and `timestamp` is
-set only when the device sent one.
+Arguments are strict. Addresses, indexes, counts and classes must be JSON
+integers (not booleans, strings or floats); `count` is 1-1000. `value` must be
+a JSON boolean or the string `"true"` or `"false"` (any case); anything else,
+such as `"off"`, `1` or `"yes"`, is rejected rather than guessed. Each point
+comes back as `{ index, value, flags, quality, timestamp }`, where `quality`
+lists the flag names (for example `ONLINE`) and `timestamp` is set only when
+the device sent one.
+
+Controls put the result in `meta` as well as in the text:
+
+| `meta.outcome` | Meaning |
+|----------------|---------|
+| `operated` | The outstation confirmed the OPERATE / DIRECT_OPERATE with status `SUCCESS` |
+| `rejected` | The outstation refused it (control status or IIN error); nothing operated |
+| `not_sent` | No OPERATE / DIRECT_OPERATE was sent (writes disabled, no connection, or the SELECT got no usable answer); nothing operated |
+| `unknown` | An OPERATE / DIRECT_OPERATE may have reached the outstation but was not confirmed. It may have been applied: read the output back before retrying |
+
+`meta.request_sent` is `true` whenever any control request (a SELECT
+included) may have reached the outstation. Controls are never retried.
+
+The outstation may push unsolicited responses while a call is in progress.
+The server does not enable unsolicited reporting, but any unsolicited response
+the outstation sends is confirmed (which removes those events from the
+outstation) and returned in `meta.unsolicited`, so nothing is dropped. One the
+library cannot fully decode is not confirmed and is reported in
+`meta.warnings`.
 
 ## Configuration
 
 Set these in the environment, in the `env` block of your MCP client config, or
-in a `.env` file (see below). A malformed value stops the server at startup
-with a message on stderr; problems inside the point-map file are reported by
-the tools instead.
+in a `.env` file (see below; `DNP3_WRITES_ENABLED` is not read from an implicit
+`.env`). A malformed value stops the server at startup with a message on
+stderr; problems inside the point-map file are reported by the tools instead.
+[`dnp3-python/.env.example`](dnp3-python/.env.example) lists them all.
 
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `DNP3_CONNECTION_TYPE` | `tcp` | Only `tcp` is implemented; `serial` is rejected at startup |
+| `DNP3_SERIAL_PORT` | unset | Serial is not implemented: setting it stops the server at startup rather than quietly using TCP |
 | `DNP3_HOST` | `127.0.0.1` | Outstation (or gateway) host |
 | `DNP3_PORT` | `20000` | Outstation TCP port |
-| `DNP3_MASTER_ADDRESS` | `1` | This master's DNP3 link address (0-65519) |
+| `DNP3_MASTER_ADDRESS` | `1` | This master's DNP3 link address (0-65519). `1` is a common production value too: against real equipment, use an address of its own (see [SECURITY.md](SECURITY.md)) |
 | `DNP3_LOCAL_ADDRESS` | unset | Old name for `DNP3_MASTER_ADDRESS`; used only when that is unset, and an error if the two differ |
 | `DNP3_TIMEOUT` | `5000` | Milliseconds; bounds the TCP connect and each request/response exchange |
 | `DNP3_MAX_RETRIES` | `3` | Extra attempts for reads and polls after a connection failure or timeout (0-10). Controls are never retried |
 | `DNP3_CONTROL_MODE` | `select_before_operate` | Or `direct_operate` |
-| `DNP3_WRITES_ENABLED` | `false` | `true` allows `write_binary_output` and `write_point_by_alias`. Only true/false spellings (`true`, `1`, `yes`, `on` / `false`, `0`, `no`, `off`) are accepted |
+| `DNP3_WRITES_ENABLED` | `false` | `true` allows `write_binary_output` and `write_point_by_alias`. Only true/false spellings (`true`, `1`, `yes`, `on` / `false`, `0`, `no`, `off`) are accepted. Read only from the real environment or an explicit `--env-file`, never from an implicit `./.env` |
 | `POINT_MAP_FILE` | unset | Path to a JSON point map (see below) |
 
 At startup the server loads a `.env` file from the directory it is started in
 (with `uv --directory .../dnp3-python run dnp3-mcp`, that is
 `dnp3-python/.env`). Parent directories are not searched, and variables that
-are already set in the environment win. All settings are read after that file
-is loaded.
+are already set in the environment win. That implicit `.env` may set
+connection settings, but **not** `DNP3_WRITES_ENABLED`: an MCP client may
+start the server in its own project directory, which you may not control. If
+the file tries, the server logs a warning on stderr naming the variable and
+ignores it. To keep the write switch in a file, name the file explicitly:
+
+```bash
+uv run dnp3-mcp --env-file /etc/dnp3-mcp/bench.env
+```
+
+An `--env-file` replaces the implicit `./.env` and may set every variable,
+`DNP3_WRITES_ENABLED` included. All settings are read after the file is
+loaded.
 
 ### Point map
 
@@ -190,20 +227,50 @@ LATCH_ON/LATCH_OFF. See
 - **Latching controls only.** `write_binary_output` sends LATCH_ON/LATCH_OFF.
   Devices that only accept pulse or trip/close codes will answer
   `NOT_SUPPORTED`, which is reported as a failure.
-- **One connection per call.** There is no persistent session, so unsolicited
-  reporting is not used and the outstation's `DEVICE_RESTART` indication is not
-  cleared by the server (it shows up in `meta.iin`).
+- **One connection per call.** There is no persistent session. Some
+  outstations accept one master connection at a time and will refuse this one,
+  or drop the connection they already have, while a call runs. The server never
+  enables unsolicited reporting; unsolicited data that arrives anyway is
+  returned in `meta.unsolicited`. The outstation's `DEVICE_RESTART` indication
+  is not cleared by the server (it shows up in `meta.iin`).
 - **Library coverage.** Responses are decoded by dnp3py. If a response holds an
   object it cannot size (opendnp3 includes group 50 variation 4 in its Class 0
-  response, for example), the rest of that fragment is skipped and the result
-  carries `meta.incomplete: true` with a warning. Range reads still fail if any
-  requested index is missing.
+  response, for example), the rest of that fragment is skipped. For Class 0 the
+  result carries `meta.incomplete: true` and a warning; for an event poll the
+  fragment is not confirmed and the call fails, so the events stay on an
+  outstation that waits for confirmation. Range reads fail if any requested
+  index is missing.
 - **Mock analogs are integers.** dnp3py's outstation encodes analog inputs as
   32-bit integers (group 30 variation 1), so the mock's values are whole
   numbers. The master decodes floating-point variations from real devices.
-- The master is tested against the mock by the test suite, and was checked by
-  hand against an opendnp3 outstation (the `yadnp3` bindings), but not against
-  vendor hardware. Treat a first connection to a real device as a test.
+- The master is tested against the mock and, in a separate CI job, against an
+  opendnp3 outstation (the `yadnp3` bindings), but not against vendor hardware.
+  Treat a first connection to a real device as a test.
+
+### About dnp3py
+
+[dnp3py](https://pypi.org/project/dnp3py/) was chosen because it is
+maintained, pure Python (it installs on macOS and Linux without native
+libraries) and provides both a master and an outstation. The alternatives on
+PyPI are master-only, unmaintained, Linux/Windows-only or commercial. It is
+also young: a 0.x beta from one maintainer's repository, with no author or
+project links in its PyPI metadata and open protocol bugs. This server
+contains that risk as follows:
+
+- It is pinned to exactly `dnp3py==0.6.0`, because the server relies on some of
+  its internals (it subclasses its master and runner to capture fragments and
+  withhold confirmations).
+- Two defects are worked around here. dnp3py's own control builder writes a
+  one-octet object count with qualifier 0x28, which makes every control on an
+  index above 255 malformed, so this server encodes controls itself. dnp3py
+  confirms response fragments it could only partly decode, which would delete
+  events the server never saw, so the server withholds that confirmation for
+  event data.
+- Some object variations have no decoder in dnp3py; responses containing them
+  are flagged as incomplete (see above).
+- Besides the dnp3py-against-dnp3py tests, CI runs the master against an
+  opendnp3 outstation, the de facto reference implementation, covering reads,
+  event polls with confirmation and controls up to index 65535.
 
 ## Part of IndustriConnect
 
