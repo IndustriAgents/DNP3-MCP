@@ -34,27 +34,29 @@ class FakeMaster(DNP3Master):
     def __init__(self, config: DNP3Config, fail: Exception | None = None) -> None:
         super().__init__(config)
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.request_scopes: list[Any] = []
         self.fail = fail
 
-    def _record(self, name: str, *args: Any) -> None:
+    def _record(self, name: str, *args: Any, request_scope: Any = None) -> None:
         self.calls.append((name, args))
+        self.request_scopes.append(request_scope)
         if self.fail:
             raise self.fail
 
-    async def read_binary_inputs(self, outstation: int, start: int, count: int) -> Any:
-        self._record("read_binary_inputs", outstation, start, count)
+    async def read_binary_inputs(self, outstation: int, start: int, count: int, *, request_scope: Any = None) -> Any:
+        self._record("read_binary_inputs", outstation, start, count, request_scope=request_scope)
         return [{"index": start, "value": True}], {"outstation": outstation}
 
-    async def read_analog_inputs(self, outstation: int, start: int, count: int) -> Any:
-        self._record("read_analog_inputs", outstation, start, count)
+    async def read_analog_inputs(self, outstation: int, start: int, count: int, *, request_scope: Any = None) -> Any:
+        self._record("read_analog_inputs", outstation, start, count, request_scope=request_scope)
         return [{"index": start, "value": 1.5}], {"outstation": outstation}
 
-    async def write_binary_output(self, outstation: int, index: int, value: bool) -> Any:
-        self._record("write_binary_output", outstation, index, value)
+    async def write_binary_output(self, outstation: int, index: int, value: bool, *, request_scope: Any = None) -> Any:
+        self._record("write_binary_output", outstation, index, value, request_scope=request_scope)
         return {"status": "SUCCESS"}
 
-    async def poll_class(self, outstation: int, event_class: int) -> Any:
-        self._record("poll_class", outstation, event_class)
+    async def poll_class(self, outstation: int, event_class: int, *, request_scope: Any = None) -> Any:
+        self._record("poll_class", outstation, event_class, request_scope=request_scope)
         return {"outstation": outstation, "class": event_class, "count": 0, "points": []}, {}
 
 

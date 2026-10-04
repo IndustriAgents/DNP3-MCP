@@ -163,6 +163,12 @@ every call has an overall deadline (see `DNP3_TIMEOUT`).
 (`notifications/cancelled`) or disconnects (closes the server's stdin) while
 the control is queued, connecting, or between SELECT and OPERATE, nothing more
 is sent for it: the server checks for both right before every control request.
+That check reads the MCP request's own cancel flag directly, because the SDK
+marks a request cancelled at once but anyio only interrupts the call at its
+next wait: a cancel that lands just as the call is granted the lock, finishes
+connecting or receives the SELECT answer would otherwise still let one request
+out. A cancelled call ends as a cancellation (the SDK has already answered
+"Request cancelled"), and its outcome is written to stderr.
 On a disconnect, every call in flight is stopped, nothing further is sent, and
 the outcome of each abandoned control is written to stderr (no OPERATE after a
 SELECT: `rejected`; nothing sent yet: `not_sent`; an OPERATE already on the

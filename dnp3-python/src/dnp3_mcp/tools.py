@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BeforeValidator, Field, StrictBool, StrictInt
@@ -211,6 +212,25 @@ CONSUMES_EVENTS = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idem
 NOT_SENT = {"outcome": "not_sent", "request_sent": False}
 
 
+def request_cancel_scope(server: FastMCP) -> anyio.CancelScope | None:
+    """The cancel scope of the MCP request now being handled, or None outside one.
+
+    RequestResponder.cancel() cancels this scope synchronously when the client
+    sends notifications/cancelled, before anyio interrupts the task; the master
+    checks it right before every send. This reads private mcp<2 attributes
+    (`session._in_flight`, `RequestResponder._cancel_scope`), hence the getattr
+    guards and tests/test_cancel_race.py, which fails if they move.
+    """
+    try:
+        context = server._mcp_server.request_context
+    except (LookupError, AttributeError):
+        return None
+    in_flight = getattr(context.session, "_in_flight", None)
+    responder = in_flight.get(context.request_id) if isinstance(in_flight, dict) else None
+    scope = getattr(responder, "_cancel_scope", None)
+    return scope if isinstance(scope, anyio.CancelScope) else None
+
+
 def register_tools(server: FastMCP, resources: ToolResources) -> None:
     master = resources.master
     point_map = resources.point_map
@@ -271,9 +291,12 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         Any unsolicited data the outstation pushes meanwhile is confirmed (so it
         is removed from the outstation) and returned in meta.unsolicited.
         """
+        request_scope = request_cancel_scope(server)
 
         async def call() -> dict[str, Any]:
-            points, meta = await master.read_binary_inputs(outstation_address, start_index, count)
+            points, meta = await master.read_binary_inputs(
+                outstation_address, start_index, count, request_scope=request_scope
+            )
             return ok({"outstation": outstation_address, "points": points}, meta)
 
         return await guarded("read_binary_inputs", call)
@@ -288,9 +311,12 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         the outstation does not return every requested index. Unsolicited data
         received meanwhile is returned in meta.unsolicited.
         """
+        request_scope = request_cancel_scope(server)
 
         async def call() -> dict[str, Any]:
-            points, meta = await master.read_analog_inputs(outstation_address, start_index, count)
+            points, meta = await master.read_analog_inputs(
+                outstation_address, start_index, count, request_scope=request_scope
+            )
             return ok({"outstation": outstation_address, "points": points}, meta)
 
         return await guarded("read_analog_inputs", call)
@@ -311,12 +337,13 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         request may have reached the outstation. Unsolicited data received
         meanwhile is in meta.unsolicited.
         """
+        request_scope = request_cancel_scope(server)
         refused = writes_refused("write_binary_output")
         if refused:
             return refused
 
         async def call() -> dict[str, Any]:
-            meta = await master.write_binary_output(outstation_address, index, value)
+            meta = await master.write_binary_output(outstation_address, index, value, request_scope=request_scope)
             return ok({"outstation": outstation_address, "index": index, "value": value}, meta)
 
         return await guarded("write_binary_output", call, write=True)
@@ -337,9 +364,10 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         stopped.
         Unsolicited data received meanwhile is returned in meta.unsolicited.
         """
+        request_scope = request_cancel_scope(server)
 
         async def call() -> dict[str, Any]:
-            data, meta = await master.poll_class(outstation_address, event_class)
+            data, meta = await master.poll_class(outstation_address, event_class, request_scope=request_scope)
             return ok(data, meta)
 
         return await guarded("poll_class", call)

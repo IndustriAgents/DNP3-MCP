@@ -26,7 +26,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 import anyio
 import anyio.lowlevel
@@ -599,19 +599,25 @@ class DNP3Master:
 
     # -- public operations --------------------------------------------------
 
+    # Every operation takes `request_scope`: the cancel scope of the MCP request
+    # it serves (see tools.request_cancel_scope). Nothing is sent once that scope
+    # has been cancelled, even before anyio has delivered the cancellation.
+
     async def read_binary_inputs(
-        self, outstation: int, start: int, count: int
+        self, outstation: int, start: int, count: int, *, request_scope: anyio.CancelScope | None = None
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """READ binary inputs (g1, any variation) start..start+count-1."""
-        return await self._read_static("binary_input", 1, outstation, start, count)
+        return await self._read_static("binary_input", 1, outstation, start, count, request_scope)
 
     async def read_analog_inputs(
-        self, outstation: int, start: int, count: int
+        self, outstation: int, start: int, count: int, *, request_scope: anyio.CancelScope | None = None
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """READ analog inputs (g30, any variation) start..start+count-1."""
-        return await self._read_static("analog_input", 30, outstation, start, count)
+        return await self._read_static("analog_input", 30, outstation, start, count, request_scope)
 
-    async def poll_class(self, outstation: int, event_class: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def poll_class(
+        self, outstation: int, event_class: int, *, request_scope: anyio.CancelScope | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """READ class 0 (static data) or one event class (1-3).
 
         A Class 1-3 poll is not retried once any of its fragments has been
@@ -640,6 +646,7 @@ class DNP3Master:
                     log,
                     protect_solicited=events,
                     retry_allowed=(lambda: not log.confirmed_solicited()) if events else None,
+                    request_scope=request_scope,
                 )
             except _UnconfirmedFragment as exc:
                 raise DNP3ProtocolError(
@@ -663,7 +670,9 @@ class DNP3Master:
         points = [v.as_dict(with_kind=True) for v in reply.values if not v.unsolicited]
         return {"outstation": outstation, "class": event_class, "count": len(points), "points": points}, meta
 
-    async def write_binary_output(self, outstation: int, index: int, value: bool) -> dict[str, Any]:
+    async def write_binary_output(
+        self, outstation: int, index: int, value: bool, *, request_scope: anyio.CancelScope | None = None
+    ) -> dict[str, Any]:
         """Latch a binary output on or off with a CROB and confirm the outstation accepted it."""
         not_sent = {"outcome": OUTCOME_NOT_SENT, "request_sent": False}
         if not self.config.writes_enabled:
@@ -697,7 +706,7 @@ class DNP3Master:
                 try:
                     async with self._lock:
                         stage = "connect"
-                        await self._before_send(scope)
+                        await self._before_send(scope, request_scope)
                         session = _Session(self, outstation, log)
                         try:
                             try:
@@ -710,7 +719,7 @@ class DNP3Master:
                                 # Delivers a deadline, a client cancellation or a disconnect that
                                 # arrived while waiting for the previous answer, before anything is
                                 # written: dnp3py writes a frame before its first await.
-                                await self._before_send(scope)
+                                await self._before_send(scope, request_scope)
                                 stage = function
                                 iin |= await self._control_step(session, function, index, value, base_meta)
                             stage = "done"
@@ -768,7 +777,13 @@ class DNP3Master:
     # -- internals ----------------------------------------------------------
 
     async def _read_static(
-        self, kind: str, group: int, outstation: int, start: int, count: int
+        self,
+        kind: str,
+        group: int,
+        outstation: int,
+        start: int,
+        count: int,
+        request_scope: anyio.CancelScope | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         _check_outstation(outstation)
         _check_index("start_index", start)
@@ -781,7 +796,10 @@ class DNP3Master:
         log = _CallLog()
         started = time.perf_counter()
         reply, attempts = await self._read_with_retries(
-            outstation, lambda session: session.master.build_range_poll(group, 0, start, stop), log
+            outstation,
+            lambda session: session.master.build_range_poll(group, 0, start, stop),
+            log,
+            request_scope=request_scope,
         )
         meta = log.annotate(self._meta(outstation, started, attempts, reply))
         self._raise_for_iin(reply.iin, "READ", meta)
@@ -809,6 +827,7 @@ class DNP3Master:
         *,
         protect_solicited: bool = False,
         retry_allowed: Callable[[], bool] | None = None,
+        request_scope: anyio.CancelScope | None = None,
     ) -> tuple[_Reply, int]:
         async def attempt() -> _Reply:
             session = _Session(self, outstation, log, protect_solicited=protect_solicited)
@@ -827,8 +846,8 @@ class DNP3Master:
                 try:
                     async with self._lock:
                         started = True
-                        await self._before_send(scope)
-                        return await self._with_retries(attempt, retry_allowed, scope)
+                        await self._before_send(scope, request_scope)
+                        return await self._with_retries(attempt, retry_allowed, scope, request_scope)
                 finally:
                     self._active.discard(scope)
             if self.closing is not None:
@@ -848,29 +867,47 @@ class DNP3Master:
             log.annotate(exc.meta)
             raise
 
-    async def _before_send(self, scope: anyio.CancelScope) -> None:
-        """Last stop before anything goes on the wire: honour a disconnect, a cancellation or the deadline.
+    async def _before_send(self, scope: anyio.CancelScope, request_scope: anyio.CancelScope | None = None) -> None:
+        """Last stop before anything goes on the wire: honour a client cancellation, a disconnect or the deadline.
 
-        The call's one deadline (`scope.deadline`, set when the tool call
-        started) is compared with the clock explicitly: the event loop may
-        resume this task before it runs the deadline's own timer, so a
-        checkpoint alone could let a request out after the deadline.
+        Each condition is checked explicitly, not only through a checkpoint.
+        anyio does not interrupt a task whose wait has just completed (a lock
+        was granted, a connect finished, an answer arrived): the MCP SDK's
+        RequestResponder.cancel() marks the request's scope cancelled at once,
+        but the task still runs one more step, and dnp3py writes a frame
+        before its first await. Likewise the event loop may resume the task
+        before it runs the deadline's own timer.
         """
+        if request_scope is not None and request_scope.cancel_called:
+            await self._await_cancellation(request_scope)
         if self.closing is not None or anyio.current_time() >= scope.deadline:
             scope.cancel()
         await anyio.lowlevel.checkpoint()
+
+    @staticmethod
+    async def _await_cancellation(request_scope: anyio.CancelScope) -> NoReturn:
+        """The client cancelled this call: send nothing, and let anyio deliver that cancellation.
+
+        The SDK has already answered "Request cancelled", so the call must end
+        with the cancellation itself rather than with a result. anyio delivers
+        it at one of the next checkpoints.
+        """
+        for _ in range(1000):
+            await anyio.sleep(0)
+        raise anyio.get_cancelled_exc_class()(f"request cancelled by the MCP client ({id(request_scope):x})")
 
     async def _with_retries(
         self,
         operation: Callable[[], Awaitable[T]],
         retry_allowed: Callable[[], bool] | None = None,
         scope: anyio.CancelScope | None = None,
+        request_scope: anyio.CancelScope | None = None,
     ) -> tuple[T, int]:
         attempts = 0
         while True:
             attempts += 1
             if scope is not None and attempts > 1:
-                await self._before_send(scope)
+                await self._before_send(scope, request_scope)
             try:
                 return await operation(), attempts
             except (DNP3ConnectionError, DNP3TimeoutError) as exc:

@@ -65,9 +65,11 @@ pure-Python dnp3py stack). What that means for security:
 - **A cancelled or abandoned control stays unsent.** If the MCP client cancels
   a control, or disconnects (closes stdin), while it is queued, connecting or
   between SELECT and OPERATE, no OPERATE or DIRECT_OPERATE is sent afterwards:
-  the server checks for both immediately before every control request, and on
-  a disconnect it stops every call in flight and logs each abandoned control's
-  outcome on stderr.
+  the server checks for both immediately before every control request,
+  including the MCP request's own cancel flag (so a cancel that lands in the
+  same instant as a lock grant, a completed connect or a SELECT answer still
+  stops the next request), and on a disconnect it stops every call in flight
+  and logs each abandoned control's outcome on stderr.
 - **No authentication or encryption.** DNP3 Secure Authentication and TLS are
   not implemented. Serial links are not supported.
 - **The protocol stack is young.** DNP3 is handled by dnp3py, a 0.x beta from a

@@ -159,6 +159,11 @@ you used.
   deadline, set when it starts and shared by the lock wait, the connect,
   SELECT, OPERATE and every read retry; never restart it per step, and check
   the clock against it (not only a checkpoint) right before each send.
+- Before each send, also check the MCP request's cancel scope
+  (`tools.request_cancel_scope`, a private mcp<2 API pinned by
+  `tests/test_cancel_race.py`). When it is cancelled, end the call as a
+  cancellation; never return an envelope, because the SDK has already
+  answered and a second answer fails its `assert not self._completed`.
   Check for cancellation and for the client having gone (`DNP3Master.closing`)
   immediately before every send; dnp3py writes a frame before its first
   await, so a pending cancellation alone does not stop it.
