@@ -71,3 +71,71 @@ jobs:
 
       - name: Entry point help
         run: uv run --locked dnp3-mock-outstation --help
+
+  # Every other test runs dnp3py against dnp3py. This one checks the master
+  # against opendnp3, the reference implementation (yadnp3 bindings, which
+  # ship wheels for Linux x86_64), and an opendnp3 master against the mock.
+  interop:
+    name: Interop with opendnp3 (yadnp3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dnp3-python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies and yadnp3 from uv.lock
+        run: uv sync --locked --group interop
+
+      - name: Interop tests (pytest tests/interop)
+        env:
+          REQUIRE_OPENDNP3: "1"
+        run: uv run --locked --group interop pytest tests/interop -v
+
+  # The declared lower bounds must be versions the suite passes on. Each
+  # direct dependency (and pytest) is installed at exactly its declared floor.
+  lowest:
+    name: Lowest declared dependencies (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [dnp3-python, dnp3-mock-outstation]
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Pin every direct dependency to its declared floor
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY' > floors.txt
+          import re, tomllib
+          project = tomllib.load(open("pyproject.toml", "rb"))
+          requirements = project["project"]["dependencies"] + project["dependency-groups"]["dev"]
+          for requirement in requirements:
+              match = re.match(r"([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?\s*(?:>=|==)\s*([0-9][^,;\s]*)", requirement)
+              if match is None:
+                  raise SystemExit(f"no lower bound in {requirement!r}")
+              print(f"{match.group(1)}=={match.group(2)}")
+          PY
+          cat floors.txt
+
+      - name: Install the project at those floors
+        run: |
+          uv venv --python 3.11 .venv-lowest
+          uv pip install --python .venv-lowest -e . pytest -c floors.txt
+
+      - name: Tests (pytest) at the floors
+        run: .venv-lowest/bin/python -m pytest -p no:cacheprovider
+
