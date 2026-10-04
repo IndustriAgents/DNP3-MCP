@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Any, TypeVar
 
 import anyio
+import anyio.lowlevel
 from dnp3.application.builder import (
     build_all_objects_request,
     build_direct_operate_request,
@@ -237,6 +238,7 @@ class PointValue:
     flags: int
     timestamp: datetime | None
     unsolicited: bool
+    fragment: int = 0  # number of the fragment it came in, within the call
 
     def as_dict(self, *, with_kind: bool = False) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -255,23 +257,96 @@ class PointValue:
 
 
 @dataclass
-class _CallLog:
-    """What one tool call received outside the replies it asked for."""
+class _Fragment:
+    """One response fragment received during a call."""
 
-    unsolicited: list[PointValue] = field(default_factory=list)
+    number: int
+    raw: bytes
+    info: ResponseInfo | None = None
+    confirmed: bool = False  # a CONFIRM for it was sent, or its sending was attempted
+    duplicate: bool = False  # a retransmission of an unsolicited fragment already received
+
+    @property
+    def unsolicited(self) -> bool:
+        return self.info is not None and bool(self.info.is_unsolicited)
+
+
+@dataclass
+class _CallLog:
+    """Everything one tool call received, across its connections and attempts.
+
+    A CONFIRM tells the outstation it may delete the events in that fragment,
+    so any value from a confirmed fragment must reach the client, whatever
+    happens to the rest of the call.
+    """
+
+    values: list[PointValue] = field(default_factory=list)
+    fragments: list[_Fragment] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
+    @property
+    def current(self) -> int:
+        return self.fragments[-1].number if self.fragments else 0
+
+    def begin_fragment(self, raw: bytes) -> _Fragment:
+        fragment = _Fragment(number=len(self.fragments) + 1, raw=raw)
+        self.fragments.append(fragment)
+        return fragment
+
+    def finish_fragment(self, fragment: _Fragment, info: ResponseInfo | None) -> None:
+        fragment.info = info
+        if info is None or not info.is_unsolicited:
+            return
+        # An outstation retransmits an unconfirmed unsolicited response with the
+        # same sequence number and content.
+        for earlier in self.fragments[:-1]:
+            if earlier.unsolicited and earlier.info.sequence == info.sequence and earlier.raw == fragment.raw:
+                fragment.duplicate = True
+                break
+        if info.truncation is not None and not fragment.duplicate:
+            self.warnings.append(describe_truncation(info) + "; it was not confirmed")
+
+    def mark_confirmed(self, sequence: int, uns: bool) -> None:
+        for fragment in reversed(self.fragments):
+            info = fragment.info
+            if info is not None and info.sequence == sequence and bool(info.is_unsolicited) == uns:
+                fragment.confirmed = True
+                return
+
+    def confirmed_solicited(self) -> bool:
+        return any(f.confirmed and not f.unsolicited for f in self.fragments)
+
+    def confirmed_events(self) -> list[PointValue]:
+        numbers = {f.number for f in self.fragments if f.confirmed and not f.unsolicited}
+        return [v for v in self.values if v.fragment in numbers]
+
+    def unsolicited_entries(self) -> list[dict[str, Any]]:
+        by_number = {f.number: f for f in self.fragments}
+        entries = []
+        for value in self.values:
+            fragment = by_number.get(value.fragment)
+            if fragment is None or not fragment.unsolicited or fragment.duplicate:
+                continue
+            copies = [
+                f
+                for f in self.fragments
+                if f.unsolicited and f.info.sequence == fragment.info.sequence and f.raw == fragment.raw
+            ]
+            entries.append({**value.as_dict(with_kind=True), "confirmed": any(f.confirmed for f in copies)})
+        return entries
+
     def annotate(self, meta: dict[str, Any]) -> dict[str, Any]:
-        if self.unsolicited:
-            # These were confirmed, so the outstation has deleted them: they must not be dropped.
-            meta["unsolicited"] = [v.as_dict(with_kind=True) for v in self.unsolicited]
+        unsolicited = self.unsolicited_entries()
+        if unsolicited:
+            # A confirmed unsolicited event is deleted by the outstation, so it must not be dropped here.
+            meta["unsolicited"] = unsolicited
         if self.warnings:
             meta.setdefault("warnings", []).extend(w for w in self.warnings if w not in meta["warnings"])
         return meta
 
 
 class _Collector:
-    """SOE handler that records every value delivered during a session."""
+    """SOE handler that records every value delivered, tagged with its fragment."""
 
     def __init__(self, log: _CallLog) -> None:
         self.values: list[PointValue] = []
@@ -286,10 +361,10 @@ class _Collector:
                 flags=int(v.quality),
                 timestamp=v.timestamp,
                 unsolicited=bool(info.is_unsolicited),
+                fragment=self._log.current,
             )
             self.values.append(point)
-            if point.unsolicited:
-                self._log.unsolicited.append(point)
+            self._log.values.append(point)
 
     def on_binary_input(self, values: list[Any], info: ResponseInfo) -> None:
         self._add("binary_input", values, info, lambda v: bool(v.value))
@@ -315,10 +390,10 @@ class _Collector:
 
 @dataclass
 class _CapturingMaster(Master):
-    """dnp3py Master that keeps the raw fragments and the last parsed fragment's info.
+    """dnp3py Master that logs every fragment it parses.
 
     dnp3py does not hand control-status echoes to the SOE handler, so the
-    g12v1 objects are decoded from these fragments instead.
+    g12v1 objects are decoded from the raw fragments instead.
     """
 
     fragments: list[bytes] = field(default_factory=list, init=False)
@@ -326,11 +401,12 @@ class _CapturingMaster(Master):
     log: _CallLog = field(default_factory=_CallLog, init=False)
 
     def process_response(self, data: bytes) -> ResponseInfo | None:
-        self.fragments.append(bytes(data))
-        info = super().process_response(data)
+        raw = bytes(data)
+        self.fragments.append(raw)
+        fragment = self.log.begin_fragment(raw)
+        info = super().process_response(data)  # delivers values, tagged with this fragment
         self.last_info = info
-        if info is not None and info.is_unsolicited and info.truncation is not None:
-            self.log.warnings.append(describe_truncation(info) + "; it was not confirmed")
+        self.log.finish_fragment(fragment, info)
         return info
 
 
@@ -344,9 +420,9 @@ class _GuardedRunner(MasterTcpRunner):
 
     A CONFIRM tells the outstation it may delete the events in that fragment.
     dnp3py 0.6.0 sends it even when it stopped decoding part way, so events
-    after the stopping point would be lost. Unsolicited
-    fragments always carry events; solicited ones do for Class 1-3 polls
-    (`protect_solicited`).
+    after the stopping point would be lost. Unsolicited fragments always carry
+    events; solicited ones do for Class 1-3 polls (`protect_solicited`).
+    Every CONFIRM that is sent is recorded in the call log.
     """
 
     protect_solicited: bool = False
@@ -368,6 +444,9 @@ class _GuardedRunner(MasterTcpRunner):
                 # one is confirmed, so the exchange ends here.
                 raise _UnconfirmedFragment(describe_truncation(info))
             return
+        # Recorded before sending: once the write starts, the outstation may
+        # receive it and delete those events.
+        self.master.log.mark_confirmed(sequence, uns)
         await super()._send_confirm(sequence, uns=uns, deadline=deadline)
 
 
@@ -422,10 +501,12 @@ class _Session:
             raise DNP3ConnectionError(f"Could not connect to {self._describe}: {exc or type(exc).__name__}") from exc
 
     async def close(self) -> None:
-        try:
-            await self.runner.close()
-        finally:
-            await self.channel.close()
+        # Shielded: it also runs when the call's overall deadline has cancelled it.
+        with anyio.CancelScope(shield=True):
+            try:
+                await self.runner.close()
+            finally:
+                await self.channel.close()
 
     async def request(self, fragment: RequestFragment) -> _Reply:
         self.master.fragments.clear()
@@ -457,12 +538,55 @@ def _format_indexes(indexes: list[int]) -> str:
     return shown + (f" and {len(indexes) - 20} more" if len(indexes) > 20 else "")
 
 
+def _with_confirmed_events(exc: DNP3MasterError, log: _CallLog) -> DNP3MasterError:
+    """Attach the events of already-confirmed fragments to a failed event poll."""
+    events = log.confirmed_events()
+    if not events:
+        return exc
+    exc.meta["confirmed_events"] = [v.as_dict(with_kind=True) for v in events]
+    message = (
+        f"{exc} {len(events)} event(s) from fragments that were already confirmed (so the outstation has "
+        "deleted them) are in meta.confirmed_events."
+    )
+    replacement = type(exc)(message, exc.meta)
+    replacement.__cause__ = exc
+    return replacement
+
+
 class DNP3Master:
     """Async DNP3 master over TCP."""
+
+    # Added to every overall per-call deadline (see `read_deadline_s`).
+    deadline_slack_s: float = 2.0
 
     def __init__(self, config: DNP3Config | None = None) -> None:
         self.config = config or DNP3Config()
         self._lock = anyio.Lock()
+        # Set when the MCP client has gone (stdin closed): nothing is sent after that.
+        self.closing: str | None = None
+        self._active: set[anyio.CancelScope] = set()
+
+    def shutdown(self, reason: str) -> None:
+        """Stop for good: cancel every operation in flight and refuse to send anything more.
+
+        Called when the MCP client disconnects. A control that has not been sent
+        yet is never sent afterwards.
+        """
+        if self.closing is None:
+            self.closing = reason
+            logger.warning("Shutting down DNP3 operations: %s", reason)
+        for scope in list(self._active):
+            scope.cancel()
+
+    @property
+    def read_deadline_s(self) -> float:
+        """Upper bound for a whole read or poll: connect plus exchange, for every attempt."""
+        return 2 * self.config.timeout_s * (self.config.max_retries + 1) + self.deadline_slack_s
+
+    @property
+    def control_deadline_s(self) -> float:
+        """Upper bound for a whole control: connect plus SELECT and OPERATE (never retried)."""
+        return 3 * self.config.timeout_s + self.deadline_slack_s
 
     # -- public operations --------------------------------------------------
 
@@ -479,10 +603,16 @@ class DNP3Master:
         return await self._read_static("analog_input", 30, outstation, start, count)
 
     async def poll_class(self, outstation: int, event_class: int) -> tuple[dict[str, Any], dict[str, Any]]:
-        """READ class 0 (static data) or one event class (1-3)."""
+        """READ class 0 (static data) or one event class (1-3).
+
+        A Class 1-3 poll is not retried once any of its fragments has been
+        confirmed, and if it fails after that, the confirmed events are
+        returned in meta.confirmed_events.
+        """
         _check_outstation(outstation)
         if isinstance(event_class, bool) or event_class not in (0, 1, 2, 3):
             raise DNP3MasterError(f"event_class must be 0, 1, 2 or 3, got {event_class!r}")
+        events = event_class > 0
 
         def build(session: _Session) -> RequestFragment:
             if event_class == 0:
@@ -494,36 +624,49 @@ class DNP3Master:
         log = _CallLog()
         started = time.perf_counter()
         try:
-            reply, attempts = await self._read_with_retries(outstation, build, log, protect_solicited=event_class > 0)
-        except _UnconfirmedFragment as exc:
-            raise DNP3ProtocolError(
-                f"The class {event_class} poll response could not be fully decoded: {exc}. It was not confirmed, "
-                "so an outstation that waits for confirmation keeps those events.",
-                log.annotate({**self._meta(outstation, started, 1), "incomplete": True, "warnings": [str(exc)]}),
-            ) from exc
-        meta = log.annotate(self._meta(outstation, started, attempts, reply))
-        self._raise_for_iin(reply.iin, "READ", meta)
-        if event_class > 0 and reply.warnings:
-            raise DNP3ProtocolError(
-                f"The class {event_class} poll response could not be fully decoded, so it was not confirmed and "
-                "nothing is returned as complete. An outstation that waits for confirmation keeps those events. "
-                + " ".join(reply.warnings),
-                meta,
-            )
+            try:
+                reply, attempts = await self._read_with_retries(
+                    outstation,
+                    build,
+                    log,
+                    protect_solicited=events,
+                    retry_allowed=(lambda: not log.confirmed_solicited()) if events else None,
+                )
+            except _UnconfirmedFragment as exc:
+                raise DNP3ProtocolError(
+                    f"The class {event_class} poll response could not be fully decoded: {exc}. That fragment was "
+                    "not confirmed, so an outstation that waits for confirmation keeps its events.",
+                    log.annotate({**self._meta(outstation, started, 1), "incomplete": True, "warnings": [str(exc)]}),
+                ) from exc
+            meta = log.annotate(self._meta(outstation, started, attempts, reply))
+            self._raise_for_iin(reply.iin, "READ", meta)
+            if events and reply.warnings:
+                raise DNP3ProtocolError(
+                    f"The class {event_class} poll response could not be fully decoded, so the fragment concerned "
+                    "was not confirmed and the poll is not reported as complete. An outstation that waits for "
+                    "confirmation keeps the events of that fragment. " + " ".join(reply.warnings),
+                    meta,
+                )
+        except DNP3MasterError as exc:
+            if events:
+                raise _with_confirmed_events(exc, log) from exc.__cause__
+            raise
         points = [v.as_dict(with_kind=True) for v in reply.values if not v.unsolicited]
         return {"outstation": outstation, "class": event_class, "count": len(points), "points": points}, meta
 
     async def write_binary_output(self, outstation: int, index: int, value: bool) -> dict[str, Any]:
         """Latch a binary output on or off with a CROB and confirm the outstation accepted it."""
+        not_sent = {"outcome": OUTCOME_NOT_SENT, "request_sent": False}
         if not self.config.writes_enabled:
-            raise DNP3WritesDisabledError(
-                "Write operations are disabled (DNP3_WRITES_ENABLED is false)",
-                {"outcome": OUTCOME_NOT_SENT, "request_sent": False},
-            )
-        _check_outstation(outstation)
-        _check_index("index", index)
-        if not isinstance(value, bool):
-            raise DNP3MasterError(f"value must be a boolean, got {value!r}")
+            raise DNP3WritesDisabledError("Write operations are disabled (DNP3_WRITES_ENABLED is false)", not_sent)
+        try:
+            _check_outstation(outstation)
+            _check_index("index", index)
+            if not isinstance(value, bool):
+                raise DNP3MasterError(f"value must be a boolean, got {value!r}")
+        except DNP3MasterError as exc:
+            exc.meta.update(not_sent)
+            raise
 
         code = "LATCH_ON" if value else "LATCH_OFF"
         mode = self.config.control_mode
@@ -531,25 +674,50 @@ class DNP3Master:
         base_meta = {"outstation": outstation, "index": index, "control_code": code, "mode": mode}
         steps = ("SELECT", "OPERATE") if mode == "select_before_operate" else ("DIRECT_OPERATE",)
         log = _CallLog()
+        stage = "connect"
+        iin = IIN(0)
+        deadline = self.control_deadline_s
 
         async with self._lock:
-            session = _Session(self, outstation, log)
             try:
-                try:
-                    await session.open()
-                except DNP3ConnectionError as exc:
-                    raise DNP3ControlError(
-                        f"{exc}. No control was sent.",
-                        {**base_meta, "outcome": OUTCOME_NOT_SENT, "request_sent": False},
-                    ) from exc
-                iin = IIN(0)
-                try:
-                    for function in steps:
-                        iin |= await self._control_step(session, function, index, value, base_meta)
-                finally:
-                    await session.close()
+                with anyio.move_on_after(deadline) as scope:
+                    self._active.add(scope)
+                    try:
+                        await self._before_send(scope)
+                        session = _Session(self, outstation, log)
+                        try:
+                            try:
+                                await session.open()
+                            except DNP3ConnectionError as exc:
+                                raise DNP3ControlError(
+                                    f"{exc}. No control was sent.", {**base_meta, **not_sent}
+                                ) from exc
+                            for function in steps:
+                                # Delivers a client cancellation or disconnect that arrived while
+                                # waiting for the previous answer, before anything is written:
+                                # dnp3py writes a frame before its first await.
+                                await self._before_send(scope)
+                                stage = function
+                                iin |= await self._control_step(session, function, index, value, base_meta)
+                            stage = "done"
+                        finally:
+                            await session.close()
+                    finally:
+                        self._active.discard(scope)
+                if scope.cancelled_caught and stage != "done":
+                    raise self._control_abort_error(stage, index, deadline, base_meta)
             except DNP3MasterError as exc:
                 log.annotate(exc.meta)
+                raise
+            except BaseException:
+                # A client cancellation: nothing more is sent for this call.
+                logger.warning(
+                    "Control on binary output %d of outstation %d cancelled by the client during %s; "
+                    "nothing more will be sent",
+                    index,
+                    outstation,
+                    stage,
+                )
                 raise
 
         meta = {
@@ -620,87 +788,155 @@ class DNP3Master:
         log: _CallLog,
         *,
         protect_solicited: bool = False,
+        retry_allowed: Callable[[], bool] | None = None,
     ) -> tuple[_Reply, int]:
         async def attempt() -> _Reply:
             session = _Session(self, outstation, log, protect_solicited=protect_solicited)
-            await session.open()
             try:
+                await session.open()
                 return await session.request(build(session))
             finally:
                 await session.close()
 
+        deadline = self.read_deadline_s
         async with self._lock:
             try:
-                return await self._with_retries(attempt)
+                with anyio.move_on_after(deadline) as scope:
+                    self._active.add(scope)
+                    try:
+                        await self._before_send(scope)
+                        return await self._with_retries(attempt, retry_allowed, scope)
+                    finally:
+                        self._active.discard(scope)
+                if self.closing is not None:
+                    raise DNP3ConnectionError(f"Request abandoned: {self.closing}", {"closing": True})
+                raise DNP3TimeoutError(
+                    f"Outstation {outstation} at {self.config.host}:{self.config.port} did not complete the "
+                    f"request within the overall deadline of {deadline:g} s",
+                    {"deadline_s": deadline},
+                )
             except DNP3MasterError as exc:
                 log.annotate(exc.meta)
                 raise
 
-    async def _with_retries(self, operation: Callable[[], Awaitable[T]]) -> tuple[T, int]:
+    async def _before_send(self, scope: anyio.CancelScope) -> None:
+        """Last stop before anything goes on the wire: honour a disconnect or a cancellation."""
+        if self.closing is not None:
+            scope.cancel()
+        await anyio.lowlevel.checkpoint()
+
+    async def _with_retries(
+        self,
+        operation: Callable[[], Awaitable[T]],
+        retry_allowed: Callable[[], bool] | None = None,
+        scope: anyio.CancelScope | None = None,
+    ) -> tuple[T, int]:
         attempts = 0
         while True:
             attempts += 1
+            if scope is not None and attempts > 1:
+                await self._before_send(scope)
             try:
                 return await operation(), attempts
             except (DNP3ConnectionError, DNP3TimeoutError) as exc:
+                exc.meta.setdefault("attempts", attempts)
                 if attempts > self.config.max_retries:
-                    exc.meta.setdefault("attempts", attempts)
+                    raise
+                if retry_allowed is not None and not retry_allowed():
+                    # Events already confirmed would be deleted by the outstation;
+                    # a retry would only fetch what is left.
+                    exc.meta["retried"] = False
                     raise
                 logger.warning("%s; retrying (%d of %d)", exc, attempts, self.config.max_retries)
+
+    def _control_abort_error(self, stage: str, index: int, deadline: float, meta: dict[str, Any]) -> DNP3ControlError:
+        """A control cut short by the overall deadline or by the client disconnecting.
+
+        `stage` is the last request that may have been sent: "connect" (none),
+        "SELECT" (OPERATE never sent) or "OPERATE" / "DIRECT_OPERATE".
+        """
+        if self.closing is not None:
+            message = f"The control on binary output {index} was abandoned ({self.closing})"
+            extra: dict[str, Any] = {"closing": True}
+        else:
+            message = (
+                f"The control on binary output {index} did not complete within the overall deadline of {deadline:g} s"
+            )
+            extra = {"deadline_s": deadline}
+        if stage == "connect":
+            error = DNP3ControlError(
+                f"{message} before anything was sent. No control was sent.",
+                {**meta, "outcome": OUTCOME_NOT_SENT, "request_sent": False, **extra},
+            )
+        elif stage == "SELECT":
+            error = DNP3ControlError(
+                f"{message} after the SELECT. Nothing was operated; OPERATE was not sent.",
+                {**meta, "outcome": OUTCOME_REJECTED, "request_sent": True, "failed_step": stage, **extra},
+            )
+        else:
+            error = DNP3ControlError(
+                f"{message} during {stage}. The control may have been applied; read the output's state back "
+                "before retrying.",
+                {**meta, "outcome": OUTCOME_UNKNOWN, "request_sent": True, "failed_step": stage, **extra},
+            )
+        if self.closing is not None:
+            # Nobody may be listening any more: leave the outcome on stderr.
+            logger.warning("%s (outcome %s)", error, error.meta["outcome"])
+        return error
 
     async def _control_step(
         self, session: _Session, function: str, index: int, value: bool, meta: dict[str, Any]
     ) -> IIN:
-        """Send one control request and require a matching SUCCESS echo.
+        """Send one control request and require a matching SUCCESS echo with no IIN error.
 
-        Every failure carries meta.outcome and meta.request_sent. A SELECT never
-        operates anything, so a failed SELECT is "rejected" when the outstation
-        refused it and "not_sent" otherwise (OPERATE is then not sent). A failed
-        OPERATE / DIRECT_OPERATE is "rejected" when the outstation refused it and
-        "unknown" when it may have acted.
+        Every failure carries meta.outcome and meta.request_sent. A SELECT
+        operates nothing and OPERATE is never sent after a failed one, so any
+        SELECT failure once the SELECT was sent is "rejected". After an OPERATE
+        or DIRECT_OPERATE, only a matching echo with a non-SUCCESS status is
+        "rejected"; everything else that is not a clean success is "unknown".
         """
         acting = function != "SELECT"
-        unknown = (
+        tail = (
             "The control may have been applied; read the output's state back before retrying."
             if acting
-            else "Nothing was operated."
+            else "Nothing was operated; OPERATE was not sent."
         )
-        unanswered = OUTCOME_UNKNOWN if acting else OUTCOME_NOT_SENT
-        fragment = build_crob_request(function, index, value, session.next_sequence())
+        unanswered = OUTCOME_UNKNOWN if acting else OUTCOME_REJECTED
+        try:
+            fragment = build_crob_request(function, index, value, session.next_sequence())
+        except Exception as exc:
+            raise DNP3ControlError(
+                f"Could not encode {function} for binary output {index}: {exc}. Nothing was sent.",
+                {**meta, "outcome": OUTCOME_NOT_SENT, "request_sent": False, "failed_step": function},
+            ) from exc
         sent = fragment.objects[0].data[-CROB_SIZE:]
-        # True whenever the request may have reached the outstation.
+        # From here on the request may have reached the outstation.
         sent_meta = {**meta, "request_sent": True, "failed_step": function}
         try:
             reply = await session.request(fragment)
         except (DNP3TimeoutError, DNP3ConnectionError) as exc:
             raise DNP3ControlError(
-                f"{function} for binary output {index}: {exc}. {unknown}", {**sent_meta, "outcome": unanswered}
+                f"{function} for binary output {index}: {exc}. {tail}", {**sent_meta, "outcome": unanswered}
             ) from exc
         except Exception as exc:  # e.g. a response the library could not parse
             raise DNP3ControlError(
-                f"{function} for binary output {index} failed: {type(exc).__name__}: {exc}. {unknown}",
+                f"{function} for binary output {index} failed: {type(exc).__name__}: {exc}. {tail}",
                 {**sent_meta, "outcome": unanswered},
             ) from exc
 
         step_meta = {**sent_meta, "iin": iin_names(reply.iin)}
-        if reply.iin & REQUEST_ERROR_IIN:
-            rejected = iin_names(reply.iin & REQUEST_ERROR_IIN)
-            raise DNP3ControlError(
-                f"Outstation rejected {function} for binary output {index} (IIN {', '.join(rejected)}). "
-                "Nothing was operated.",
-                {**step_meta, "outcome": OUTCOME_REJECTED},
-            )
+        iin_error = iin_names(reply.iin & REQUEST_ERROR_IIN)
         echo = crob_echoes(reply.fragments).get(index)
         if echo is None:
+            detail = f" (IIN {', '.join(iin_error)})" if iin_error else ""
             raise DNP3ControlError(
-                f"{function} response for binary output {index} carried no control status. {unknown}",
+                f"{function} response for binary output {index} carried no control status{detail}. {tail}",
                 {**step_meta, "outcome": unanswered},
             )
         if echo[:-1] != sent[:-1]:
             # IEEE 1815-2012 4.4.3: the response must echo the request's objects.
-            follow = "OPERATE was not sent; nothing was operated." if function == "SELECT" else unknown
             raise DNP3ControlError(
-                f"{function} response for binary output {index} does not echo the control that was sent. {follow}",
+                f"{function} response for binary output {index} does not echo the control that was sent. {tail}",
                 {
                     **step_meta,
                     "status": "SELECT_MISMATCH" if function == "SELECT" else "ECHO_MISMATCH",
@@ -712,9 +948,16 @@ class DNP3Master:
         status = echo[-1] & 0x7F
         if status != CommandStatus.SUCCESS:
             name = command_status_name(status)
+            follow = "Nothing was operated; OPERATE was not sent." if not acting else "Nothing was operated."
             raise DNP3ControlError(
-                f"Outstation rejected {function} for binary output {index} with status {name}. Nothing was operated.",
+                f"Outstation rejected {function} for binary output {index} with status {name}. {follow}",
                 {**step_meta, "status": name, "outcome": OUTCOME_REJECTED},
+            )
+        if iin_error:
+            raise DNP3ControlError(
+                f"{function} for binary output {index} was answered with status SUCCESS but IIN "
+                f"{', '.join(iin_error)}. {tail}",
+                {**step_meta, "status": "SUCCESS", "outcome": unanswered},
             )
         return reply.iin
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import re
 import socket
 import subprocess
@@ -116,7 +117,7 @@ class Received:
     data: bytes  # the whole application fragment
 
 
-Script = Callable[[Received], Iterable[bytes]]
+Script = Callable[[Received], Iterable[bytes] | Awaitable[Iterable[bytes]]]
 
 
 class ScriptedOutstation:
@@ -181,7 +182,10 @@ class ScriptedOutstation:
                     self.received.append(received)
                     if received.function == FunctionCode.CONFIRM or self.script is None:
                         continue
-                    for fragment in self.script(received):
+                    answer = self.script(received)
+                    if inspect.isawaitable(answer):  # a script may hold its answer back
+                        answer = await answer
+                    for fragment in answer:
                         for segment in segmenter.segment(fragment):
                             frame_out = build_unconfirmed_user_data(master, self.address, False, segment.to_bytes())
                             writer.write(frame_out.to_bytes())

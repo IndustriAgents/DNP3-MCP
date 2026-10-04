@@ -16,11 +16,14 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
+from dnp3.core.enums import FunctionCode
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from .conftest import MOCK_OUTSTATION_ADDRESS as OUTSTATION
+from .conftest import Received, crob_echo
 
 pytestmark = pytest.mark.anyio
 
@@ -346,3 +349,83 @@ async def test_implicit_env_file_cannot_enable_writes(mock_process: int, tmp_pat
     )
     ping, _ = await _ping_and_stderr(params, tmp_path / "c.err")
     assert ping["data"]["writes_enabled"] is True
+
+
+@pytest.mark.parametrize("close_stdout", [False, True], ids=["stdin-closed", "both-pipes-closed"])
+async def test_client_disconnect_never_lets_an_operate_out(scripted: Any, tmp_path: Path, close_stdout: bool) -> None:
+    """The client closes stdin while a control waits for its SELECT answer: no OPERATE may follow."""
+    release, seen = anyio.Event(), anyio.Event()
+
+    async def script(request: Received) -> list[bytes]:
+        if request.function == FunctionCode.SELECT:
+            seen.set()
+            await release.wait()
+        return [crob_echo(request)]
+
+    outstation = await scripted(script)
+    command, args = server_command()
+    proc = subprocess.Popen(
+        [command, *args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=tmp_path,
+        env=server_env(
+            PYTHONUNBUFFERED="1",
+            DNP3_PORT=str(outstation.port),
+            DNP3_WRITES_ENABLED="true",
+            DNP3_TIMEOUT="20000",
+        ),
+        text=True,
+    )
+    try:
+        assert proc.stdin is not None
+        for message in (
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "0"},
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "write_binary_output",
+                    "arguments": {"outstation_address": OUTSTATION, "index": 3, "value": True},
+                },
+            },
+        ):
+            proc.stdin.write(json.dumps(message) + "\n")
+        proc.stdin.flush()
+        with anyio.fail_after(20):
+            await seen.wait()  # the SELECT is on the wire and the outstation is holding its answer
+
+        # The client goes away: both pipes close, as when a client process dies.
+        proc.stdin.close()
+        if close_stdout:
+            assert proc.stdout is not None
+            proc.stdout.close()
+        with anyio.move_on_after(10):
+            while proc.poll() is None:
+                await anyio.sleep(0.05)
+
+        release.set()  # the outstation finally answers the SELECT
+        await anyio.sleep(1.5)
+        assert outstation.functions() == [FunctionCode.SELECT]
+        assert proc.poll() is not None, "the server kept running after its client disconnected"
+        stderr = proc.stderr.read() if proc.stderr else ""
+        assert "disconnected" in stderr and "outcome rejected" in stderr, stderr
+        # A reply that can no longer be delivered is a normal end, not a crash.
+        assert proc.returncode == 0, stderr
+        assert "Traceback" not in stderr, stderr
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()

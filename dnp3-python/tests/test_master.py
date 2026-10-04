@@ -177,7 +177,8 @@ async def test_control_timeout_is_never_retried(scripted: Any) -> None:
     sbo = make_master(silent.port, timeout_ms=300, max_retries=3)
     with pytest.raises(DNP3ControlError, match="SELECT .* Nothing was operated") as excinfo:
         await sbo.write_binary_output(OUTSTATION, 3, True)
-    assert (excinfo.value.meta["outcome"], excinfo.value.meta["request_sent"]) == ("not_sent", True)
+    # The SELECT went out, so never not_sent; a SELECT alone operates nothing, so rejected.
+    assert (excinfo.value.meta["outcome"], excinfo.value.meta["request_sent"]) == ("rejected", True)
     assert silent.connections == 1
     assert silent.functions() == [FunctionCode.SELECT]
 
@@ -270,24 +271,54 @@ async def test_control_step_requires_a_success_echo() -> None:
         await _step(_Reply([_info()], [_crob_response(3, 0, uns=True)], []))
 
 
-async def test_control_step_iin_errors_and_link_failures() -> None:
-    with pytest.raises(DNP3ControlError, match=r"rejected OPERATE .*IIN NO_FUNC_CODE_SUPPORT") as e:
-        await _step(_Reply([_info(IIN.NO_FUNC_CODE_SUPPORT)], [_crob_response(3, 0)], []))
+IIN2_ERRORS = [IIN.NO_FUNC_CODE_SUPPORT, IIN.OBJECT_UNKNOWN, IIN.PARAMETER_ERROR, IIN.ALREADY_EXECUTING]
+
+
+@pytest.mark.parametrize("bit", IIN2_ERRORS, ids=lambda b: b.name)
+@pytest.mark.parametrize("function", ["OPERATE", "DIRECT_OPERATE"])
+async def test_iin_error_with_a_success_echo_after_operate_is_unknown(bit: IIN, function: str) -> None:
+    # The echo says SUCCESS: the outstation may well have acted. Only a refused status is "rejected".
+    with pytest.raises(DNP3ControlError, match=f"status SUCCESS but IIN {bit.name}. The control may have been") as e:
+        await _step(_Reply([_info(bit)], [_crob_response(3, 0)], []), function=function)
+    assert (e.value.meta["outcome"], e.value.meta["request_sent"]) == ("unknown", True)
+    with pytest.raises(DNP3ControlError, match="carried no control status .*may have been applied") as e:
+        await _step(_Reply([_info(bit)], [], []), function=function)
+    assert e.value.meta["outcome"] == "unknown"
+    with pytest.raises(DNP3ControlError, match="status NOT_SUPPORTED. Nothing was operated") as e:
+        await _step(_Reply([_info(bit)], [_crob_response(3, 4)], []), function=function)
     assert e.value.meta["outcome"] == "rejected"
-    with pytest.raises(DNP3ControlError, match="may have been applied; read the output.s state back before retrying"):
-        await _step(DNP3ConnectionError("Link to outstation 10 failed"))
-    with pytest.raises(DNP3ControlError, match="Nothing was operated"):
-        await _step(DNP3TimeoutError("No response"), function="SELECT")
-    with pytest.raises(DNP3ControlError, match="failed: ValueError: bad frame. The control may have been applied"):
-        await _step(ValueError("bad frame"))
+
+
+@pytest.mark.parametrize("bit", IIN2_ERRORS, ids=lambda b: b.name)
+async def test_every_select_failure_is_rejected_after_sending(bit: IIN) -> None:
+    replies: list[_Reply | Exception] = [
+        _Reply([_info(bit)], [_crob_response(3, 0)], []),  # SUCCESS echo but an IIN error
+        _Reply([_info(bit)], [], []),  # IIN error, no echo
+        _Reply([_info()], [], []),  # no echo
+        _Reply([_info()], [_crob_response(3, 1)], []),  # refused status
+        DNP3TimeoutError("No response"),
+        DNP3ConnectionError("Link failed"),
+        ValueError("bad frame"),
+    ]
+    for reply in replies:
+        with pytest.raises(DNP3ControlError, match="Nothing was operated") as e:
+            await _step(reply, function="SELECT")
+        assert (e.value.meta["outcome"], e.value.meta["request_sent"]) == ("rejected", True), reply
+
+
+async def test_control_step_link_failures_after_operate_are_unknown() -> None:
+    for failure in (DNP3ConnectionError("Link failed"), DNP3TimeoutError("No response"), ValueError("bad frame")):
+        with pytest.raises(DNP3ControlError, match="may have been applied; read the output.s state back") as e:
+            await _step(failure)
+        assert (e.value.meta["outcome"], e.value.meta["request_sent"]) == ("unknown", True)
 
 
 async def test_control_step_compares_the_echo_with_the_request() -> None:
     # The stub echoes LATCH_ON (0x03); a LATCH_OFF request must not accept it.
     echo_on = _Reply([_info()], [_crob_response(3, 0)], [])
-    with pytest.raises(DNP3ControlError, match="does not echo the control that was sent. OPERATE was not sent") as e:
+    with pytest.raises(DNP3ControlError, match="does not echo the control that was sent. Nothing was operated") as e:
         await _step(echo_on, function="SELECT", value=False)
-    assert e.value.meta["status"] == "SELECT_MISMATCH" and e.value.meta["outcome"] == "not_sent"
+    assert e.value.meta["status"] == "SELECT_MISMATCH" and e.value.meta["outcome"] == "rejected"
     with pytest.raises(DNP3ControlError, match="does not echo .* may have been applied") as e:
         await _step(echo_on, function="DIRECT_OPERATE", value=False)
     assert e.value.meta["status"] == "ECHO_MISMATCH" and e.value.meta["outcome"] == "unknown"
