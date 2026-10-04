@@ -212,13 +212,16 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+interop = [
+    { name = "yadnp3", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0.0" },
-    { name = "dnp3py", specifier = ">=0.6.0,<0.7" },
+    { name = "anyio", specifier = ">=4.5" },
+    { name = "dnp3py", specifier = "==0.6.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.22.0,<2" },
-    { name = "pydantic", specifier = ">=2.6.0" },
+    { name = "pydantic", specifier = ">=2.11.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
 ]
 
@@ -227,6 +230,7 @@ dev = [
     { name = "pytest", specifier = ">=8.2.0" },
     { name = "ruff", specifier = ">=0.6.0" },
 ]
+interop = [{ name = "yadnp3", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==3.2.1.2" }]
 
 [[package]]
 name = "dnp3py"
@@ -850,4 +854,16 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/cb/ce/f06b84e2697fef4688ca63bdb2fdf113ca0a3be33f94488f2cadb690b0cf/uvicorn-0.38.0.tar.gz", hash = "sha256:fd97093bdd120a2609fc0d3afe931d4d4ad688b6e75f0f929fde1bc36fe0e91d", size = 80605, upload-time = "2025-10-18T13:46:44.63Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ee/d9/d88e73ca598f4f6ff671fb5fde8a32925c2e08a637303a1d12883c7305fa/uvicorn-0.38.0-py3-none-any.whl", hash = "sha256:48c0afd214ceb59340075b4a052ea1ee91c16fbc2a9b1469cca0e54566977b02", size = 68109, upload-time = "2025-10-18T13:46:42.958Z" },
+]
+
+[[package]]
+name = "yadnp3"
+version = "3.2.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/b3/0abe70cfe70845efe6e484fdfb4d0f8984145f1c8154ccb29aebc9ff1245/yadnp3-3.2.1.2.tar.gz", hash = "sha256:36eb2a765f3f4048bb0e05c2d3cb8a049c93fb211f68816a77293410d9b73ecd", size = 63739, upload-time = "2026-09-25T05:32:20.146Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/7f/9ccbb16d6bea3a52b795aa21ac1f9efcf1d5d74bff174c6e097ee5ffafc2/yadnp3-3.2.1.2-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7fa6d9377d4c8b9227dcaa66b253d6b62e457959710dd536f6c606646ef6e564", size = 3273181, upload-time = "2026-09-25T05:32:01.98Z" },
+    { url = "https://files.pythonhosted.org/packages/67/66/ab923d8ce75c42146f1f7993b62c4ceb5cbf54104704e80fd65a59cb0972/yadnp3-3.2.1.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9af188de112e7bf1f0c74663255b74770f7de4b6e9114022b74a4f4c719e4985", size = 3289166, upload-time = "2026-09-25T05:32:05.585Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/a7/757325bb696ae00d926557f48411bb75a221095976184a112bf5084bc2c9/yadnp3-3.2.1.2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:87304bbabf00a60c1b025c74f0be1f5d57e8dbe0f88597a6215c367180d5e5ff", size = 3289028, upload-time = "2026-09-25T05:32:09.997Z" },
+    { url = "https://files.pythonhosted.org/packages/13/68/0bd8ee044fc015c1e753c1df69dc5ad4d05ad42fce7859ef9c60fbb8902e/yadnp3-3.2.1.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0237cb202d2183f30efdb4def691c0ccc4f0a653d6801946057be4e42d117930", size = 3288949, upload-time = "2026-09-25T05:32:13.552Z" },
 ]

@@ -7,14 +7,16 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "IndustriAgents", email = "hi@industriagents.com" }]
 dependencies = [
-    "anyio>=4.0.0",
-    # Pure-Python DNP3 (IEEE 1815-2012) master and outstation. Pinned to a
-    # minor series because the master decodes control echoes from its parsed
-    # fragments; re-test before widening.
-    "dnp3py>=0.6.0,<0.7",
+    "anyio>=4.5",
+    # Pure-Python DNP3 (IEEE 1815-2012) master and outstation. Pinned exactly:
+    # dnp3_master.py relies on its internals (Master.process_response,
+    # MasterTcpRunner._send_confirm, ResponseInfo.truncation) and works around
+    # its CROB-encoding and confirm bugs. Re-run the opendnp3 interop tests
+    # (tests/interop) before changing it.
+    "dnp3py==0.6.0",
     # mcp 2.x renamed FastMCP and changed its API; this server targets 1.x.
     "mcp[cli]>=1.22.0,<2",
-    "pydantic>=2.6.0",
+    "pydantic>=2.11.0",
     "python-dotenv>=1.1.0",
 ]
 
@@ -22,6 +24,11 @@ dependencies = [
 dev = [
     "pytest>=8.2.0",
     "ruff>=0.6.0",
+]
+# opendnp3 (the yadnp3 bindings) as an independent reference outstation and
+# master for tests/interop. Wheels exist only for Linux x86_64 and Windows.
+interop = [
+    "yadnp3==3.2.1.2; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [project.scripts]
