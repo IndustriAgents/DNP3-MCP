@@ -25,12 +25,14 @@ DNP3_HOST=127.0.0.1 DNP3_PORT=20000 uv run dnp3-mcp
 ```
 
 Set the connection settings in the real environment, in the `env` block of
-your MCP client config, or in a `.env` file in the directory the server is
-started from (here, `dnp3-python/.env`; see [`.env.example`](.env.example)).
-Parent directories are not searched, and real environment variables take
-precedence. `DNP3_WRITES_ENABLED` is ignored (with a warning) when it comes
-from that implicit `.env`; put it in the real environment or in a file you
-pass explicitly with `uv run dnp3-mcp --env-file PATH`. See
+your MCP client config, or in `dnp3-python/.env` (see
+[`.env.example`](.env.example)). That file is found next to the package source
+in a checkout, whatever directory the server is started from; a `.env` in the
+working directory or a parent is never read, and an installed package has no
+implicit `.env`. It may set only `DNP3_*` and `POINT_MAP_FILE`, never
+`DNP3_WRITES_ENABLED`, and real environment variables take precedence. Put the
+write switch in the real environment or in a file you pass explicitly with
+`uv run dnp3-mcp --env-file PATH`. See
 [Configuration](../README.md#configuration) for every setting.
 
 ## Tests and checks
@@ -59,7 +61,7 @@ dnp3-python/
 ├── .env.example
 ├── src/dnp3_mcp
 │   ├── __init__.py
-│   ├── cli.py           # entry point: --env-file / .env (no gates), builds the server, runs stdio
+│   ├── cli.py           # entry point: --env-file, or dnp3-python/.env (DNP3_* only, no gates)
 │   ├── config.py        # environment parsing, read when the server is built
 │   ├── server.py        # FastMCP wiring, envelope for argument errors, version
 │   ├── tools.py         # the MCP tools and the point map

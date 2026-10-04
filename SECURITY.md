@@ -20,31 +20,50 @@ The server in `dnp3-python/` is a DNP3 master over TCP (built on the
 pure-Python dnp3py stack). What that means for security:
 
 - **Reads are real.** Each read or poll opens a TCP connection to `DNP3_HOST` /
-  `DNP3_PORT` and returns what the outstation sent. Class 1-3 polls confirm
-  events, which removes them from the outstation's buffer, unless the response
-  could not be fully decoded: then nothing is confirmed and the call fails.
+  `DNP3_PORT` and returns what the outstation sent.
+- **Event polls are destructive.** A Class 1-3 poll confirms each response
+  fragment, and the outstation then deletes those events, so another master on
+  the same association never sees them. The tool is annotated as destructive.
+  A poll is not retried once any fragment was confirmed, and if it fails after
+  that, the confirmed events are returned in `meta.confirmed_events`. Only a
+  fragment the library cannot fully decode is left unconfirmed.
 - **Unsolicited data is confirmed.** The server does not enable unsolicited
   reporting, but any unsolicited response the outstation sends during a call is
-  confirmed (removing those events from the outstation) and returned in
-  `meta.unsolicited`. It does not send DISABLE_UNSOLICITED or anything else that
-  changes the outstation's configuration.
+  confirmed (removing those events from the outstation) unless it cannot be
+  fully decoded, and is returned in `meta.unsolicited` with a `confirmed` flag.
+  It does not send DISABLE_UNSOLICITED or anything else that changes the
+  outstation's configuration.
 - **Controls are off by default.** `DNP3_WRITES_ENABLED` defaults to `false`,
   and `write_binary_output` / `write_point_by_alias` are refused until it is
   set to `true`. Only recognised true/false spellings are accepted; anything
   else stops the server at startup, so a typo cannot switch writes on. The
   switch is read only from the real process environment or an explicit
-  `--env-file`. A `.env` found in the working directory may set connection
-  settings, but if it sets `DNP3_WRITES_ENABLED` the server logs a warning on
-  stderr and ignores it: when an MCP client starts the server, the working
-  directory can be the client's project, which may not be trusted.
+  `--env-file`, never from the implicit `.env`, in any spelling (names are
+  compared case-insensitively, with or without `export `).
+- **The implicit `.env` is narrow.** It is read only from `dnp3-python/` of a
+  source checkout, found next to the server's own source; never from the
+  working directory or a parent, because an MCP client may start the server in
+  its own project, which may not be trusted, and the host and point map decide
+  where a control goes. An installed package has no implicit `.env`. The file
+  may set only `DNP3_*` settings and `POINT_MAP_FILE`; the write switch and
+  anything else (`PATH`, `PYTHON*`, `DYLD_*`, `LD_PRELOAD`, proxy or
+  certificate settings) are ignored with a warning on stderr.
 - **Controls are real when enabled.** A control sends a CROB (LATCH_ON or
   LATCH_OFF) using select-before-operate unless `DNP3_CONTROL_MODE=direct_operate`.
   It is reported as successful only when the outstation echoes the control
-  unchanged with status `SUCCESS`. If the link fails or times out after the
-  OPERATE (or DIRECT_OPERATE) was sent, the call reports `meta.outcome:
-  "unknown"` and says the control may have been applied. Controls are never
-  retried automatically, and a SELECT that is not answered correctly is never
-  followed by an OPERATE.
+  unchanged with status `SUCCESS` and no IIN error. If the link fails, times
+  out or answers garbage after the OPERATE (or DIRECT_OPERATE) was sent, or
+  answers `SUCCESS` with an IIN error, the call reports `meta.outcome:
+  "unknown"` and says the control may have been applied. Only a refusal status
+  in the echo counts as `rejected`. Controls are never retried automatically,
+  a SELECT that is not answered correctly is never followed by an OPERATE, and
+  every call has an overall deadline, so none can hang without an outcome.
+- **A cancelled or abandoned control stays unsent.** If the MCP client cancels
+  a control, or disconnects (closes stdin), while it is queued, connecting or
+  between SELECT and OPERATE, no OPERATE or DIRECT_OPERATE is sent afterwards:
+  the server checks for both immediately before every control request, and on
+  a disconnect it stops every call in flight and logs each abandoned control's
+  outcome on stderr.
 - **No authentication or encryption.** DNP3 Secure Authentication and TLS are
   not implemented. Serial links are not supported.
 - **The protocol stack is young.** DNP3 is handled by dnp3py, a 0.x beta from a

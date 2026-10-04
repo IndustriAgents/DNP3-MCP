@@ -149,12 +149,23 @@ you used.
 - MCP speaks over **stdio**, so `stdout` belongs to the protocol. All logging
   goes to `stderr`. A stray `print()` corrupts the session.
 - Read configuration when the server is built (after `.env` is loaded), never
-  at import time. Safety switches (`DNP3_WRITES_ENABLED`) are never taken from
-  an implicitly discovered `.env`, only from the real environment or an
-  explicit `--env-file`.
+  at import time. The implicit `.env` is `dnp3-python/.env` of a checkout only
+  (never the working directory), may set only `DNP3_*` and `POINT_MAP_FILE`,
+  and never a safety switch (`DNP3_WRITES_ENABLED`, in any case); those come
+  from the real environment or an explicit `--env-file`.
 - A write reaches the device at most once. Only (re)connecting may be retried;
   once a control may have gone out, a lost reply is reported with
-  `meta.outcome: "unknown"`, not retried.
+  `meta.outcome: "unknown"`, not retried. Every call has an overall deadline.
+  Check for cancellation and for the client having gone (`DNP3Master.closing`)
+  immediately before every send; dnp3py writes a frame before its first
+  await, so a pending cancellation alone does not stop it.
+- A Class 1-3 poll deletes the events it confirms: never retry it after a
+  confirm, and never drop values from a confirmed fragment.
+- Tools carry annotations: anything that changes a device or deletes events is
+  `destructiveHint=True, idempotentHint=False`; read-only tools are
+  `readOnlyHint=True`.
+- Mock subprocesses started by tests use `--watch-stdin` with a pipe, so a
+  killed test run leaves no mock behind.
 - Fail at startup, not at the first tool call, when configuration is unusable.
 - An error is a returned `{ success: false, error }`, not an exception that
   kills the server. The model needs to be told what went wrong.

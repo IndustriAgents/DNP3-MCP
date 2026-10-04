@@ -124,7 +124,7 @@ npx @modelcontextprotocol/inspector uv run dnp3-mcp
 | `read_binary_inputs` | `outstation_address`, `start_index`, `count` | READ group 1 for the range; fails if any index is missing |
 | `read_analog_inputs` | `outstation_address`, `start_index`, `count` | READ group 30 for the range; fails if any index is missing |
 | `write_binary_output` | `outstation_address`, `index`, `value` | CROB LATCH_ON (`true`) or LATCH_OFF (`false`) on index 0-65535; refused unless `DNP3_WRITES_ENABLED=true`; succeeds only when the outstation echoes the control unchanged with status `SUCCESS` |
-| `poll_class` | `outstation_address`, `event_class` | `0`: all static data; `1`-`3`: that event class (the events are confirmed, which clears them on the outstation; a response that cannot be fully decoded is not confirmed and the call fails) |
+| `poll_class` | `outstation_address`, `event_class` | `0`: all static data; `1`-`3`: that event class. **Destructive**: the events are confirmed, so the outstation deletes them (see below) |
 | `list_points` | none | Lists the point-map aliases, flagging invalid entries |
 | `read_point_by_alias` | `alias` | Reads a `binary_input` or `analog_input` alias |
 | `write_point_by_alias` | `alias`, `value` | Operates a `binary_output` alias; same gate and checks as `write_binary_output` |
@@ -138,31 +138,57 @@ comes back as `{ index, value, flags, quality, timestamp }`, where `quality`
 lists the flag names (for example `ONLINE`) and `timestamp` is set only when
 the device sent one.
 
+Tool annotations say which tools change something: the two write tools and
+`poll_class` are marked destructive and not idempotent; the read tools,
+`list_points` and `ping` are marked read-only.
+
 Controls put the result in `meta` as well as in the text:
 
 | `meta.outcome` | Meaning |
 |----------------|---------|
-| `operated` | The outstation confirmed the OPERATE / DIRECT_OPERATE with status `SUCCESS` |
-| `rejected` | The outstation refused it (control status or IIN error); nothing operated |
-| `not_sent` | No OPERATE / DIRECT_OPERATE was sent (writes disabled, no connection, or the SELECT got no usable answer); nothing operated |
-| `unknown` | An OPERATE / DIRECT_OPERATE may have reached the outstation but was not confirmed. It may have been applied: read the output back before retrying |
+| `operated` | The outstation echoed the OPERATE / DIRECT_OPERATE unchanged with status `SUCCESS` and no IIN error |
+| `rejected` | Nothing was operated. Either the echoed control carried a refusal status (for example `NOT_SUPPORTED`), or the SELECT failed in any way (refused, timed out, garbled or mismatched), in which case OPERATE is never sent and a SELECT alone operates nothing |
+| `not_sent` | No control request left the server: writes disabled, invalid arguments or alias, or no connection |
+| `unknown` | An OPERATE / DIRECT_OPERATE may have reached the outstation, but its success was not confirmed: no answer, a dropped link, a garbled or mismatched echo, or a `SUCCESS` echo together with an IIN error. It may have been applied: read the output back before retrying |
 
 `meta.request_sent` is `true` whenever any control request (a SELECT
-included) may have reached the outstation. Controls are never retried.
+included) may have reached the outstation. Controls are never retried, and
+every call has an overall deadline (see `DNP3_TIMEOUT`).
 
-The outstation may push unsolicited responses while a call is in progress.
-The server does not enable unsolicited reporting, but any unsolicited response
-the outstation sends is confirmed (which removes those events from the
-outstation) and returned in `meta.unsolicited`, so nothing is dropped. One the
-library cannot fully decode is not confirmed and is reported in
-`meta.warnings`.
+**Cancelling and disconnecting.** If the MCP client cancels a control
+(`notifications/cancelled`) or disconnects (closes the server's stdin) while
+the control is queued, connecting, or between SELECT and OPERATE, nothing more
+is sent for it: the server checks for both right before every control request.
+On a disconnect, every call in flight is stopped, nothing further is sent, and
+the outcome of each abandoned control is written to stderr (no OPERATE after a
+SELECT: `rejected`; nothing sent yet: `not_sent`; an OPERATE already on the
+wire: `unknown`).
+
+**Event polls delete events.** A Class 1-3 poll confirms each response
+fragment, and the outstation then deletes those events, so other masters on
+the same association will not see them and a second poll does not return them.
+A Class 1-3 poll is never retried once any fragment has been confirmed. If a
+later fragment fails (timeout, dropped link, or a fragment the library cannot
+fully decode), the call fails, and the events of the fragments already
+confirmed are returned in `meta.confirmed_events`. Fragments the server
+never confirmed (an undecodable one, or one that never arrived) stay on an
+outstation that waits for confirmation.
+
+The outstation may also push unsolicited responses while a call is in
+progress. The server does not enable unsolicited reporting, but any
+unsolicited data that arrives is returned in `meta.unsolicited`, once per
+response (retransmissions are dropped), each value with `confirmed: true`
+when the server confirmed it (so the outstation deleted it) or `false` when it
+was withheld because the library could not fully decode it (see
+`meta.warnings`).
 
 ## Configuration
 
 Set these in the environment, in the `env` block of your MCP client config, or
-in a `.env` file (see below; `DNP3_WRITES_ENABLED` is not read from an implicit
-`.env`). A malformed value stops the server at startup with a message on
-stderr; problems inside the point-map file are reported by the tools instead.
+in a `.env` file (see below; `DNP3_WRITES_ENABLED` is never read from the
+implicit `.env`). A malformed value stops the server at startup with a message
+on stderr; problems inside the point-map file are reported by the tools
+instead.
 [`dnp3-python/.env.example`](dnp3-python/.env.example) lists them all.
 
 | Variable | Default | Notes |
@@ -173,26 +199,32 @@ stderr; problems inside the point-map file are reported by the tools instead.
 | `DNP3_PORT` | `20000` | Outstation TCP port |
 | `DNP3_MASTER_ADDRESS` | `1` | This master's DNP3 link address (0-65519). `1` is a common production value too: against real equipment, use an address of its own (see [SECURITY.md](SECURITY.md)) |
 | `DNP3_LOCAL_ADDRESS` | unset | Old name for `DNP3_MASTER_ADDRESS`; used only when that is unset, and an error if the two differ |
-| `DNP3_TIMEOUT` | `5000` | Milliseconds; bounds the TCP connect and each request/response exchange |
+| `DNP3_TIMEOUT` | `5000` | Milliseconds; bounds the TCP connect and each request/response exchange. A whole call is also bounded: reads and polls by 2 x timeout x (retries + 1) + 2 s, controls by 3 x timeout + 2 s (42 s and 17 s with the defaults, so the server rather than a client's 60 s timeout decides the outcome); past that, a read fails cleanly and a control reports `unknown` (or `rejected` during SELECT, `not_sent` before anything was sent) |
 | `DNP3_MAX_RETRIES` | `3` | Extra attempts for reads and polls after a connection failure or timeout (0-10). Controls are never retried |
 | `DNP3_CONTROL_MODE` | `select_before_operate` | Or `direct_operate` |
-| `DNP3_WRITES_ENABLED` | `false` | `true` allows `write_binary_output` and `write_point_by_alias`. Only true/false spellings (`true`, `1`, `yes`, `on` / `false`, `0`, `no`, `off`) are accepted. Read only from the real environment or an explicit `--env-file`, never from an implicit `./.env` |
+| `DNP3_WRITES_ENABLED` | `false` | `true` allows `write_binary_output` and `write_point_by_alias`. Only true/false spellings (`true`, `1`, `yes`, `on` / `false`, `0`, `no`, `off`) are accepted. Read only from the real environment or an explicit `--env-file`, never from the implicit `.env` |
 | `POINT_MAP_FILE` | unset | Path to a JSON point map (see below) |
 
-At startup the server loads a `.env` file from the directory it is started in
-(with `uv --directory .../dnp3-python run dnp3-mcp`, that is
-`dnp3-python/.env`). Parent directories are not searched, and variables that
-are already set in the environment win. That implicit `.env` may set
-connection settings, but **not** `DNP3_WRITES_ENABLED`: an MCP client may
-start the server in its own project directory, which you may not control. If
-the file tries, the server logs a warning on stderr naming the variable and
-ignores it. To keep the write switch in a file, name the file explicitly:
+**The implicit `.env`.** When run from a source checkout, the server loads
+`dnp3-python/.env`, found next to its own source, never the `.env` of the
+directory it is started in or of any parent: an MCP client may start the
+server inside its own project, which you may not control, and settings such as
+the host and the point map decide where a control goes. An installed package
+has no implicit `.env` at all. That file may set only this server's own
+settings, `DNP3_*` and `POINT_MAP_FILE`, and never `DNP3_WRITES_ENABLED`. Names
+are compared case-insensitively (Windows upper-cases them), with or without an
+`export ` prefix. Anything else, such as `PATH`, `PYTHONWARNINGS`,
+`DYLD_INSERT_LIBRARIES` or a proxy setting, and any spelling of the write
+switch is ignored with a warning on stderr. Variables already set in the
+environment win.
+
+To keep the write switch in a file, name the file explicitly:
 
 ```bash
 uv run dnp3-mcp --env-file /etc/dnp3-mcp/bench.env
 ```
 
-An `--env-file` replaces the implicit `./.env` and may set every variable,
+An `--env-file` replaces the implicit `.env` and may set every variable,
 `DNP3_WRITES_ENABLED` included. All settings are read after the file is
 loaded.
 
@@ -233,13 +265,23 @@ LATCH_ON/LATCH_OFF. See
   enables unsolicited reporting; unsolicited data that arrives anyway is
   returned in `meta.unsolicited`. The outstation's `DEVICE_RESTART` indication
   is not cleared by the server (it shows up in `meta.iin`).
+- **Every call is bounded.** Besides dnp3py's own per-exchange timeout, each
+  call has an overall deadline (see `DNP3_TIMEOUT`), so a peer that answers
+  garbage cannot leave a call hanging without an outcome.
 - **Library coverage.** Responses are decoded by dnp3py. If a response holds an
   object it cannot size (opendnp3 includes group 50 variation 4 in its Class 0
   response, for example), the rest of that fragment is skipped. For Class 0 the
-  result carries `meta.incomplete: true` and a warning; for an event poll the
-  fragment is not confirmed and the call fails, so the events stay on an
-  outstation that waits for confirmation. Range reads fail if any requested
+  result carries `meta.incomplete: true` and a warning; for an event poll that
+  fragment is not confirmed and the call fails (events of earlier, confirmed
+  fragments are in `meta.confirmed_events`). Range reads fail if any requested
   index is missing.
+- **An undecodable event can block its class.** If the oldest event in a class
+  is one dnp3py cannot decode, every poll of that class stops at it, is left
+  unconfirmed and fails the same way, so the events queued behind it cannot be
+  collected by this server. To recover, collect that class with another master
+  that can decode the object (the production SCADA master, or an opendnp3-based
+  tool), clear the outstation's event buffer from its own configuration tool,
+  or reassign that point to a class this server does not poll.
 - **Mock analogs are integers.** dnp3py's outstation encodes analog inputs as
   32-bit integers (group 30 variation 1), so the mock's values are whole
   numbers. The master decodes floating-point variations from real devices.
