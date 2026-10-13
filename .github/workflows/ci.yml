@@ -31,52 +31,17 @@ jobs:
       - name: Install dependencies from uv.lock
         run: uv sync --locked
 
-      - name: Byte-compile sources
-        run: uv run --locked python -m compileall -q src
+      - name: Lint (ruff check)
+        run: uv run --locked ruff check .
 
-      - name: Import package and build the server
-        run: uv run --locked python -c "from dnp3_mcp import DNP3MCPServer; DNP3MCPServer()"
+      - name: Format check (ruff format)
+        run: uv run --locked ruff format --check .
 
-      # Starts the `dnp3-mcp` console script and talks MCP to it over stdio.
-      # The DNP3 master is still a scaffold that opens no connection, so this
-      # needs no outstation. Revisit once the master connects at startup.
-      - name: MCP handshake (initialize, tools/list, ping)
-        run: |
-          uv run --locked python - <<'PY'
-          import json
-          import shutil
-
-          import anyio
-          from mcp import ClientSession, StdioServerParameters
-          from mcp.client.stdio import stdio_client
-
-          EXPECTED = {
-              "read_binary_inputs", "read_analog_inputs", "write_binary_output",
-              "poll_class", "list_points", "read_point_by_alias",
-              "write_point_by_alias", "ping",
-          }
-
-          async def main() -> None:
-              params = StdioServerParameters(
-                  command=shutil.which("dnp3-mcp"),
-                  env={"DNP3_WRITES_ENABLED": "false"},
-              )
-              async with stdio_client(params) as (read, write):
-                  async with ClientSession(read, write) as session:
-                      init = await session.initialize()
-                      print("server:", init.serverInfo.name)
-                      names = {t.name for t in (await session.list_tools()).tools}
-                      print("tools:", sorted(names))
-                      missing = EXPECTED - names
-                      assert not missing, f"tools missing from tools/list: {sorted(missing)}"
-                      result = await session.call_tool("ping", {})
-                      envelope = json.loads(result.content[0].text)
-                      print("ping:", envelope)
-                      assert envelope["success"] is True, envelope
-                      assert envelope["data"]["writes_enabled"] is False, envelope
-
-          anyio.run(main)
-          PY
+      # Includes the end-to-end tests: they start ../dnp3-mock-outstation (a
+      # real DNP3 outstation) and drive the `dnp3-mcp` console script over
+      # stdio with the MCP client SDK.
+      - name: Tests (pytest)
+        run: uv run --locked pytest
 
   mock:
     name: Mock outstation (dnp3-mock-outstation)
@@ -95,8 +60,82 @@ jobs:
       - name: Install dependencies from uv.lock
         run: uv sync --locked
 
-      - name: Byte-compile sources
-        run: uv run --locked python -m compileall -q dnp3_mock_outstation.py
+      - name: Lint (ruff check)
+        run: uv run --locked ruff check .
+
+      - name: Format check (ruff format)
+        run: uv run --locked ruff format --check .
+
+      - name: Tests (pytest)
+        run: uv run --locked pytest
 
       - name: Entry point help
         run: uv run --locked dnp3-mock-outstation --help
+
+  # Every other test runs dnp3py against dnp3py. This one checks the master
+  # against opendnp3, the reference implementation (yadnp3 bindings, which
+  # ship wheels for Linux x86_64), and an opendnp3 master against the mock.
+  interop:
+    name: Interop with opendnp3 (yadnp3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dnp3-python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies and yadnp3 from uv.lock
+        run: uv sync --locked --group interop
+
+      - name: Interop tests (pytest tests/interop)
+        env:
+          REQUIRE_OPENDNP3: "1"
+        run: uv run --locked --group interop pytest tests/interop -v
+
+  # The declared lower bounds must be versions the suite passes on. Each
+  # direct dependency (and pytest) is installed at exactly its declared floor.
+  lowest:
+    name: Lowest declared dependencies (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [dnp3-python, dnp3-mock-outstation]
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Pin every direct dependency to its declared floor
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY' > floors.txt
+          import re, tomllib
+          project = tomllib.load(open("pyproject.toml", "rb"))
+          requirements = project["project"]["dependencies"] + project["dependency-groups"]["dev"]
+          for requirement in requirements:
+              match = re.match(r"([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?\s*(?:>=|==)\s*([0-9][^,;\s]*)", requirement)
+              if match is None:
+                  raise SystemExit(f"no lower bound in {requirement!r}")
+              print(f"{match.group(1)}=={match.group(2)}")
+          PY
+          cat floors.txt
+
+      - name: Install the project at those floors
+        run: |
+          uv venv --python 3.11 .venv-lowest
+          uv pip install --python .venv-lowest -e . pytest -c floors.txt
+
+      - name: Tests (pytest) at the floors
+        run: .venv-lowest/bin/python -m pytest -p no:cacheprovider
+

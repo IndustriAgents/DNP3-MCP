@@ -26,6 +26,7 @@
 - [ ] The mock outstation can exercise the change, and I tested against it.
 - [ ] Nothing was tested against production equipment.
 - [ ] `stdout` is still clean — all logging goes to `stderr`.
+- [ ] `uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest` pass in each project I touched.
 - [ ] If I changed dependencies, I ran `uv lock` and committed the updated `uv.lock`.
 - [ ] I updated the README(s) where relevant.
 

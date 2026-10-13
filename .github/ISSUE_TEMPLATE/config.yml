@@ -11,4 +11,4 @@ contact_links:
     about: Report privately. Please do not open a public issue.
   - name: mcp-manager-ui or suite-wide issues
     url: https://github.com/IndustriAgents/IndustriConnect/issues
-    about: Issues with mcp-manager-ui or the suite as a whole belong in IndustriConnect. Each other protocol server has its own IndustriAgents/<Protocol>-MCP repository.
+    about: Issues with mcp-manager-ui, the suite as a whole or another protocol server belong in IndustriConnect, unless that server already has its own IndustriAgents/<Protocol>-MCP repository.

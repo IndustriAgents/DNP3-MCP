@@ -1,157 +1,322 @@
-"""JSON-based DNP3 mock outstation."""
+"""Mock DNP3 outstation for developing and testing the DNP3 MCP server.
+
+This is a real DNP3 (IEEE 1815-2012) outstation over TCP, built on the
+pure-Python dnp3py stack, so the MCP server's master talks to it exactly as it
+would to a device. Points:
+
+- 16 binary inputs (index 0-15): value is True for odd indexes. Class 1.
+- 8 analog inputs (index 0-7): start at their index and take a random step of
+  -1, 0 or +1 every update interval. Class 2 events (deadband 1). Reported as
+  32-bit integers (g30v1 / g32v1), which is how dnp3py encodes analogs.
+- 8 binary outputs (index 0-7): start OFF. LATCH_ON and LATCH_OFF controls
+  (select-before-operate or direct operate) set them. Any other control code
+  or index is answered NOT_SUPPORTED. Output status is read with Class 0.
+
+Unsolicited responses are disabled and the outstation does not ask for time
+synchronisation. Logs go to stderr.
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
+import contextlib
+import logging
 import os
 import random
 import signal
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+import sys
+import threading
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
-from rich.console import Console
+from dnp3.core.enums import ControlCode
+from dnp3.core.flags import AnalogQuality, BinaryQuality
+from dnp3.database import (
+    AnalogInputConfig,
+    BinaryInputConfig,
+    BinaryOutputConfig,
+    Database,
+    DatabaseConfig,
+    EventBufferConfig,
+    EventClass,
+)
+from dnp3.outstation import (
+    CommandResult,
+    DefaultCommandHandler,
+    Outstation,
+    OutstationConfig,
+    OutstationTcpRunner,
+    UnsolicitedConfig,
+)
 
-console = Console()
+logger = logging.getLogger("dnp3_mock_outstation")
+
+BINARY_INPUTS = 16
+ANALOG_INPUTS = 8
+BINARY_OUTPUTS = 8
+MAX_LINK_ADDRESS = 0xFFEF
+EVENT_BUFFER_SIZE = 1000
 
 
-def env(default: str, key: str) -> str:
-    return os.getenv(key, default)
-
-
-@dataclass
+@dataclass(frozen=True)
 class MockConfig:
-    host: str = env("127.0.0.1", "MOCK_DNP3_HOST")
-    port: int = int(env("7300", "MOCK_DNP3_PORT"))
-    update_interval: float = float(env("1.0", "MOCK_DNP3_UPDATE_INTERVAL"))
-    verbose: bool = env("false", "MOCK_DNP3_VERBOSE").lower() in {"1", "true", "yes", "on"}
+    host: str = "127.0.0.1"
+    port: int = 20000
+    outstation_address: int = 10
+    update_interval: float = 1.0
+    verbose: bool = False
+    watch_stdin: bool = False
 
 
-@dataclass
-class PointDatabase:
-    binary_inputs: Dict[int, bool] = field(default_factory=lambda: {i: bool(i % 2) for i in range(16)})
-    analog_inputs: Dict[int, float] = field(default_factory=lambda: {i: float(i) for i in range(8)})
-    binary_outputs: Dict[int, bool] = field(default_factory=dict)
+def build_database() -> Database:
+    """The mock's points, all ONLINE, with no events queued at start."""
+    buffers = EventBufferConfig(
+        max_binary_events=EVENT_BUFFER_SIZE,
+        max_analog_events=EVENT_BUFFER_SIZE,
+        max_counter_events=EVENT_BUFFER_SIZE,
+    )
+    db = Database(config=DatabaseConfig(event_buffer_config=buffers))
+    for i in range(BINARY_INPUTS):
+        db.add_binary_input(
+            i, BinaryInputConfig(event_class=EventClass.CLASS_1), value=bool(i % 2), quality=BinaryQuality.ONLINE
+        )
+    for i in range(ANALOG_INPUTS):
+        point = db.add_analog_input(
+            i,
+            AnalogInputConfig(event_class=EventClass.CLASS_2, deadband=1.0),
+            value=float(i),
+            quality=AnalogQuality.ONLINE,
+        )
+        point.last_event_value = point.value
+    for i in range(BINARY_OUTPUTS):
+        # No output events: dnp3py would report them as binary input events.
+        db.add_binary_output(
+            i, BinaryOutputConfig(event_class=EventClass.NONE), value=False, quality=BinaryQuality.ONLINE
+        )
+    return db
+
+
+class MockCommandHandler(DefaultCommandHandler):
+    """Accepts LATCH_ON / LATCH_OFF on existing binary outputs; refuses everything else."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def _check(self, index: int, code: ControlCode) -> CommandResult:
+        if index not in self.database.binary_outputs:
+            return CommandResult.not_supported(f"no binary output {index}")
+        if code not in (ControlCode.LATCH_ON, ControlCode.LATCH_OFF):
+            return CommandResult.not_supported(f"control code 0x{int(code):02X} not supported")
+        return CommandResult.success()
+
+    def _apply(self, index: int, code: ControlCode) -> CommandResult:
+        result = self._check(index, code)
+        if result.is_success:
+            state = code == ControlCode.LATCH_ON
+            self.database.update_binary_output(index, state)
+            logger.info("Binary output %d latched %s", index, "ON" if state else "OFF")
+        else:
+            logger.info("Refused control on binary output %d: %s", index, result.message)
+        return result
+
+    def select_binary_output(
+        self, index: int, code: ControlCode, count: int, on_time: int, off_time: int
+    ) -> CommandResult:
+        return self._check(index, code)
+
+    def operate_binary_output(
+        self, index: int, code: ControlCode, count: int, on_time: int, off_time: int, select_sequence: int
+    ) -> CommandResult:
+        return self._apply(index, code)
+
+    def direct_operate_binary_output(
+        self, index: int, code: ControlCode, count: int, on_time: int, off_time: int
+    ) -> CommandResult:
+        return self._apply(index, code)
 
 
 class DNP3MockOutstation:
-    def __init__(self, config: MockConfig) -> None:
+    def __init__(self, config: MockConfig, *, rng: random.Random | None = None) -> None:
         self.config = config
-        self.db = PointDatabase()
-        self._server: Optional[asyncio.base_events.Server] = None
-        self._running = False
+        self.database = build_database()
+        self.handler = MockCommandHandler(self.database)
+        self.outstation = Outstation(
+            database=self.database,
+            config=OutstationConfig(
+                address=config.outstation_address,
+                master_address=0,  # accept any master
+                unsolicited=UnsolicitedConfig(enabled=False),
+                time_sync_required=False,
+            ),
+            handler=self.handler,
+        )
+        self.runner = OutstationTcpRunner(outstation=self.outstation, host=config.host, port=config.port)
+        self._rng = rng or random.Random()
+        self._run_task: asyncio.Task[None] | None = None
+        self._update_task: asyncio.Task[None] | None = None
+
+    @property
+    def local_address(self) -> tuple[str, int] | None:
+        return self.runner.local_address
 
     async def start(self) -> None:
-        if self._running:
+        """Start listening; returns once the socket is bound."""
+        if self._run_task is not None:
             return
-        self._running = True
-        self._server = await asyncio.start_server(self._handle_client, self.config.host, self.config.port)
-        addr = ", ".join(str(sock.getsockname()) for sock in self._server.sockets or [])
-        console.print(f"[bold green]DNP3 mock outstation listening on {addr}[/bold green]")
-        asyncio.create_task(self._update_loop())
+        self._run_task = asyncio.create_task(self.runner.run(), name="dnp3-mock-runner")
+        while not self.runner.is_running:
+            if self._run_task.done():
+                self._run_task.result()  # raises the bind error
+                raise RuntimeError("outstation runner exited before listening")
+            await asyncio.sleep(0.01)
+        if self.config.update_interval > 0:
+            # Keep a reference so the task is not garbage collected mid-run.
+            self._update_task = asyncio.create_task(self._update_loop(), name="dnp3-mock-updates")
+        host, port = self.local_address or (self.config.host, self.config.port)
+        logger.info(
+            "DNP3 mock outstation listening on %s:%d (outstation address %d)",
+            host,
+            port,
+            self.config.outstation_address,
+        )
 
     async def stop(self) -> None:
-        self._running = False
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
+        if self._update_task is not None:
+            self._update_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._update_task
+            self._update_task = None
+        if self._run_task is not None:
+            await self.runner.stop()
+            try:
+                await asyncio.wait_for(self._run_task, timeout=5)
+            except TimeoutError:
+                self._run_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._run_task
+            self._run_task = None
+
+    def step(self) -> None:
+        """One random-walk step for every analog input."""
+        for index, point in self.database.analog_inputs.items():
+            self.database.update_analog_input(index, point.value + self._rng.choice((-1.0, 0.0, 1.0)))
+        logger.debug("Analog inputs now %s", [int(p.value) for _, p in sorted(self.database.analog_inputs.items())])
 
     async def _update_loop(self) -> None:
-        while self._running:
+        while True:
             await asyncio.sleep(self.config.update_interval)
-            for idx in self.db.analog_inputs:
-                self.db.analog_inputs[idx] += random.uniform(-0.5, 0.5)
-            if self.config.verbose:
-                console.print("[cyan]Updated mock analog inputs[/cyan]")
-
-    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        peer = writer.get_extra_info("peername")
-        console.print(f"[yellow]Client connected {peer}[/yellow]")
-        try:
-            while data := await reader.readline():
-                data = data.strip()
-                if not data:
-                    continue
-                try:
-                    request = json.loads(data)
-                except json.JSONDecodeError:
-                    await self._send(writer, {"success": False, "error": "Invalid JSON"})
-                    continue
-                response = self._dispatch(request)
-                await self._send(writer, response)
-        finally:
-            writer.close()
-            await writer.wait_closed()
-            console.print(f"[yellow]Client disconnected {peer}[/yellow]")
-
-    def _dispatch(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        op = request.get("op")
-        if op == "read" and request.get("type") == "binary":
-            start = int(request.get("start", 0))
-            count = int(request.get("count", 1))
-            points = [
-                {"index": start + i, "value": bool(self.db.binary_inputs.get(start + i, False)), "quality": "ONLINE"}
-                for i in range(count)
-            ]
-            return {"success": True, "data": {"points": points}}
-        if op == "read" and request.get("type") == "analog":
-            start = int(request.get("start", 0))
-            count = int(request.get("count", 1))
-            points = [
-                {"index": start + i, "value": float(self.db.analog_inputs.get(start + i, 0.0)), "quality": "ONLINE"}
-                for i in range(count)
-            ]
-            return {"success": True, "data": {"points": points}}
-        if op == "write_binary":
-            index = int(request.get("index", 0))
-            value = bool(request.get("value", False))
-            self.db.binary_outputs[index] = value
-            return {"success": True, "data": {"index": index, "value": value}}
-        if op == "poll_class":
-            klass = int(request.get("class", 1))
-            return {"success": True, "data": {"class": klass, "events": []}}
-        return {"success": False, "error": f"Unknown op '{op}'"}
-
-    async def _send(self, writer: asyncio.StreamWriter, message: Dict[str, Any]) -> None:
-        writer.write(json.dumps(message).encode("utf-8") + b"\n")
-        await writer.drain()
+            self.step()
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Mock DNP3 outstation (JSON bridge).")
-    parser.add_argument("--host", default=env("127.0.0.1", "MOCK_DNP3_HOST"))
-    parser.add_argument("--port", type=int, default=int(env("7300", "MOCK_DNP3_PORT")))
-    parser.add_argument("--update-interval", type=float, default=float(env("1.0", "MOCK_DNP3_UPDATE_INTERVAL")))
-    parser.add_argument("--verbose", action="store_true", default=env("false", "MOCK_DNP3_VERBOSE").lower() in {"1", "true", "yes", "on"})
-    return parser.parse_args()
+def _env_float(env: Mapping[str, str], key: str, default: float) -> float:
+    raw = env.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise SystemExit(f"dnp3-mock-outstation: {key}={raw!r} is not a number") from None
+
+
+def _env_int(env: Mapping[str, str], key: str, default: int) -> int:
+    raw = env.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw, 10)
+    except ValueError:
+        raise SystemExit(f"dnp3-mock-outstation: {key}={raw!r} is not an integer") from None
+
+
+def _env_bool(env: Mapping[str, str], key: str) -> bool:
+    raw = (env.get(key) or "").strip().lower()
+    if raw in {"", "0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    raise SystemExit(f"dnp3-mock-outstation: {key}={env.get(key)!r} is not a boolean")
+
+
+def parse_args(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> MockConfig:
+    """Command line options, with defaults from the environment read at call time."""
+    env = os.environ if env is None else env
+    parser = argparse.ArgumentParser(description="Mock DNP3 outstation (DNP3 over TCP).")
+    parser.add_argument("--host", default=env.get("MOCK_DNP3_HOST") or "127.0.0.1", help="address to listen on")
+    parser.add_argument("--port", type=int, default=_env_int(env, "MOCK_DNP3_PORT", 20000), help="TCP port")
+    parser.add_argument(
+        "--outstation-address",
+        type=int,
+        default=_env_int(env, "MOCK_DNP3_OUTSTATION_ADDRESS", 10),
+        help="this outstation's DNP3 link address",
+    )
+    parser.add_argument(
+        "--update-interval",
+        type=float,
+        default=_env_float(env, "MOCK_DNP3_UPDATE_INTERVAL", 1.0),
+        help="seconds between analog random-walk steps (0 disables them)",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", default=_env_bool(env, "MOCK_DNP3_VERBOSE"), help="log every update"
+    )
+    parser.add_argument(
+        "--watch-stdin",
+        action="store_true",
+        help="stop when stdin reaches end of file, so a test harness that dies (closing the pipe) takes the mock "
+        "with it",
+    )
+    args = parser.parse_args(argv)
+    if not 0 <= args.port <= 65535:
+        parser.error(f"--port must be 0-65535, got {args.port}")
+    if not 0 <= args.outstation_address <= MAX_LINK_ADDRESS:
+        parser.error(f"--outstation-address must be 0-{MAX_LINK_ADDRESS}, got {args.outstation_address}")
+    if args.update_interval < 0:
+        parser.error("--update-interval must be >= 0")
+    return MockConfig(
+        host=args.host,
+        port=args.port,
+        outstation_address=args.outstation_address,
+        update_interval=args.update_interval,
+        verbose=args.verbose,
+        watch_stdin=args.watch_stdin,
+    )
 
 
 async def run_server(config: MockConfig) -> None:
-    server = DNP3MockOutstation(config)
-    await server.start()
+    mock = DNP3MockOutstation(config)
+    await mock.start()
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
-
-    def _signal_handler() -> None:
-        stop_event.set()
-
     for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _signal_handler)
-        except NotImplementedError:
-            pass
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, stop_event.set)
 
-    await stop_event.wait()
-    console.print("\n[red]Stopping DNP3 mock outstation...[/red]")
-    await server.stop()
+    if config.watch_stdin:
+
+        def wait_for_eof() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                while sys.stdin.buffer.read(4096):
+                    pass
+            logger.info("stdin closed")
+            loop.call_soon_threadsafe(stop_event.set)
+
+        threading.Thread(target=wait_for_eof, name="dnp3-mock-stdin", daemon=True).start()
+
+    try:
+        await stop_event.wait()
+    finally:
+        logger.info("Stopping DNP3 mock outstation")
+        await mock.stop()
 
 
-def main() -> None:
-    args = parse_args()
-    config = MockConfig(host=args.host, port=args.port, update_interval=args.update_interval, verbose=args.verbose)
-    asyncio.run(run_server(config))
+def main(argv: Sequence[str] | None = None) -> None:
+    config = parse_args(argv)
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if config.verbose:
+        logger.setLevel(logging.DEBUG)
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(run_server(config))
 
 
 if __name__ == "__main__":
