@@ -32,7 +32,7 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-__version__ = _package_version("dnp3-mcp")
+__version__ = _package_version("industriagents-dnp3-mcp")
 
 WRITE_TOOLS = frozenset({"write_binary_output", "write_point_by_alias"})
 

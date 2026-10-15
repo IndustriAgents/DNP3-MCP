@@ -25,7 +25,7 @@ _GATE_PATTERN = re.compile(r"_(WRITES|CMDS|COMMANDS|CONTROLS?|STATE_CHANGE)_ENAB
 OWN_PREFIX = "DNP3_"
 OWN_EXTRAS = ("POINT_MAP_FILE",)
 
-_PROJECT_NAME = "dnp3-mcp"
+_PROJECT_NAME = "industriagents-dnp3-mcp"
 
 
 def normalise(name: str) -> str:

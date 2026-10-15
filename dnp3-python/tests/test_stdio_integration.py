@@ -42,7 +42,7 @@ def server_env(**settings: str) -> dict[str, str]:
 
 
 def envelope_of(result: Any) -> dict[str, Any]:
-    assert not result.isError, result.content
+    assert result.isError is (json.loads(result.content[0].text).get("success") is False), result.content
     return json.loads(result.content[0].text)
 
 
@@ -65,10 +65,10 @@ async def test_mcp_session_against_the_mock(mock_process: int, tmp_path: Path) -
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         init = await session.initialize()
         assert init.serverInfo.name == "DNP3 MCP Server"
-        assert init.serverInfo.version == version("dnp3-mcp")
+        assert init.serverInfo.version == version("industriagents-dnp3-mcp")
 
         tools = (await session.list_tools()).tools
-        assert len(tools) == 8 and all(tool.description for tool in tools)
+        assert len(tools) == 5 and all(tool.description for tool in tools)
 
         async def call(tool: str, **arguments: Any) -> dict[str, Any]:
             return envelope_of(await session.call_tool(tool, arguments))
@@ -253,7 +253,7 @@ def test_stdout_carries_only_json_rpc(mock_process: int, tmp_path: Path) -> None
     def envelope(number: int) -> dict[str, Any]:
         return json.loads(responses[number]["result"]["content"][0]["text"])
 
-    called = {name for name, _ in ALL_TOOL_CALLS if name != "nope"}
+    called = {"read_inputs", "control_binary_output", "poll_class", "list_points", "ping"}
     assert {tool["name"] for tool in responses[1]["result"]["tools"]} == called  # every tool was called
     by_name = {number: name for number, (name, _) in enumerate(ALL_TOOL_CALLS, start=2)}
     for number, name in by_name.items():
@@ -278,7 +278,7 @@ async def test_starts_and_answers_without_a_device(closed_port: int, tmp_path: P
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
-        assert len((await session.list_tools()).tools) == 8
+        assert len((await session.list_tools()).tools) == 5
         assert envelope_of(await session.call_tool("ping", {}))["success"] is True
         read_result = envelope_of(
             await session.call_tool("read_binary_inputs", {"outstation_address": 10, "start_index": 0, "count": 1})

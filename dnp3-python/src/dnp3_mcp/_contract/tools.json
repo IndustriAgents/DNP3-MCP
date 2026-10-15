@@ -1,0 +1,720 @@
+{
+  "schemaVersion": 1,
+  "protocol": "dnp3",
+  "transport": "stdio",
+  "tools": [
+    {
+      "name": "read_inputs",
+      "description": "Select one source mode and provide only its parameters.\n\nbinary: Read binary inputs (DNP3 group 1) from an outstation.\n\nReads indexes start_index to start_index + count - 1 over a fresh TCP\nconnection to DNP3_HOST:DNP3_PORT. Each point has its value, its flag\noctet, the decoded quality flags and a timestamp when the device sent\none. Fails if the outstation does not return every requested index.\nAny unsolicited data the outstation pushes meanwhile is confirmed (so it\nis removed from the outstation) and returned in meta.unsolicited.\n\nanalog: Read analog inputs (DNP3 group 30) from an outstation.\n\nReads indexes start_index to start_index + count - 1 over a fresh TCP\nconnection to DNP3_HOST:DNP3_PORT. Values are returned as the device\nencodes them (integer or floating point variations, unscaled). Fails if\nthe outstation does not return every requested index. Unsolicited data\nreceived meanwhile is returned in meta.unsolicited.\n\nalias: Read one binary_input or analog_input point by its point-map alias.\n\nLooks the alias up in POINT_MAP_FILE and reads that single point from\nits outstation, returning the same envelope as read_binary_inputs or\nread_analog_inputs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "outstation_address": {
+            "description": "DNP3 link address of the outstation (0-65519).",
+            "maximum": 65519,
+            "minimum": 0,
+            "title": "Outstation Address",
+            "type": "integer"
+          },
+          "start_index": {
+            "description": "First point index to read.",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Start Index",
+            "type": "integer"
+          },
+          "count": {
+            "description": "Number of consecutive points to read (1-1000).",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Count",
+            "type": "integer"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "const": "binary",
+                "type": "string"
+              },
+              {
+                "const": "analog",
+                "type": "string"
+              },
+              {
+                "const": "alias",
+                "type": "string"
+              }
+            ],
+            "description": "Select the source mode described above."
+          },
+          "alias": {
+            "description": "Alias defined in the point map.",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Alias",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "outstation_address": {
+                "description": "DNP3 link address of the outstation (0-65519).",
+                "maximum": 65519,
+                "minimum": 0,
+                "title": "Outstation Address",
+                "type": "integer"
+              },
+              "start_index": {
+                "description": "First point index to read.",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Start Index",
+                "type": "integer"
+              },
+              "count": {
+                "description": "Number of consecutive points to read (1-1000).",
+                "maximum": 1000,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "source": {
+                "const": "binary",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outstation_address",
+              "start_index",
+              "count",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "outstation_address": {
+                "description": "DNP3 link address of the outstation (0-65519).",
+                "maximum": 65519,
+                "minimum": 0,
+                "title": "Outstation Address",
+                "type": "integer"
+              },
+              "start_index": {
+                "description": "First point index to read.",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Start Index",
+                "type": "integer"
+              },
+              "count": {
+                "description": "Number of consecutive points to read (1-1000).",
+                "maximum": 1000,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "source": {
+                "const": "analog",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outstation_address",
+              "start_index",
+              "count",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "alias": {
+                "description": "Alias defined in the point map.",
+                "maxLength": 256,
+                "minLength": 1,
+                "title": "Alias",
+                "type": "string"
+              },
+              "source": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "alias",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "control_binary_output",
+      "description": "Select one target mode and provide only its parameters.\n\naddress: Operate a binary output with a DNP3 control relay output block (CROB, group 12).\n\nvalue=true sends LATCH_ON, value=false sends LATCH_OFF, using\nselect-before-operate unless DNP3_CONTROL_MODE=direct_operate. Refused\nunless DNP3_WRITES_ENABLED=true. Succeeds only when the outstation\nanswers with control status SUCCESS and echoes the control unchanged;\nany other status, a mismatched echo, a timeout or a dropped link is\nreported as a failure, and the error says whether the output may have\nchanged. meta.outcome is \"operated\", \"rejected\", \"not_sent\" (no OPERATE\nor DIRECT_OPERATE was sent) or \"unknown\" (it may have acted; read the\noutput before retrying), and meta.request_sent says whether any control\nrequest may have reached the outstation. Unsolicited data received\nmeanwhile is in meta.unsolicited.\n\nalias: Operate a binary_output point by its point-map alias.\n\nSame as write_binary_output for the outstation and index the alias\nnames, including the DNP3_WRITES_ENABLED gate. Only binary_output\naliases can be written.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "outstation_address": {
+            "description": "DNP3 link address of the outstation (0-65519).",
+            "maximum": 65519,
+            "minimum": 0,
+            "title": "Outstation Address",
+            "type": "integer"
+          },
+          "index": {
+            "description": "Point index of the binary output.",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "value": {
+            "description": "true latches the output ON, false latches it OFF. Pass a JSON boolean; the strings \"true\" and \"false\" are also accepted. Anything else is rejected.",
+            "title": "Value",
+            "type": "boolean"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "const": "address",
+                "type": "string"
+              },
+              {
+                "const": "alias",
+                "type": "string"
+              }
+            ],
+            "description": "Select the target mode described above."
+          },
+          "alias": {
+            "description": "Alias defined in the point map.",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Alias",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "outstation_address": {
+                "description": "DNP3 link address of the outstation (0-65519).",
+                "maximum": 65519,
+                "minimum": 0,
+                "title": "Outstation Address",
+                "type": "integer"
+              },
+              "index": {
+                "description": "Point index of the binary output.",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Index",
+                "type": "integer"
+              },
+              "value": {
+                "description": "true latches the output ON, false latches it OFF. Pass a JSON boolean; the strings \"true\" and \"false\" are also accepted. Anything else is rejected.",
+                "title": "Value",
+                "type": "boolean"
+              },
+              "target": {
+                "const": "address",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outstation_address",
+              "index",
+              "value",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "alias": {
+                "description": "Alias defined in the point map.",
+                "maxLength": 256,
+                "minLength": 1,
+                "title": "Alias",
+                "type": "string"
+              },
+              "value": {
+                "description": "true latches the output ON, false latches it OFF. Pass a JSON boolean; the strings \"true\" and \"false\" are also accepted. Anything else is rejected.",
+                "title": "Value",
+                "type": "boolean"
+              },
+              "target": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "alias",
+              "value",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "poll_class",
+      "description": "Poll an outstation for Class 0 static data or Class 1/2/3 events.\n\nevent_class=0 returns every static point the device reports (inputs,\noutput status, counters). 1, 2 or 3 returns the buffered events of that\nclass and DELETES them on the outstation (they are confirmed), so other\nmasters sharing the association will not see them; repeating the call\ndoes not return them again. Each entry has its point type, index, value,\nquality flags and timestamp if sent. If an event response cannot be\nfully decoded that fragment is not confirmed and the call fails, with\nthe events of fragments already confirmed in meta.confirmed_events; for\nClass 0, meta.incomplete is true and meta.warnings says where decoding\nstopped.\nUnsolicited data received meanwhile is returned in meta.unsolicited.",
+      "inputSchema": {
+        "properties": {
+          "outstation_address": {
+            "description": "DNP3 link address of the outstation (0-65519).",
+            "maximum": 65519,
+            "minimum": 0,
+            "title": "Outstation Address",
+            "type": "integer"
+          },
+          "event_class": {
+            "description": "0 reads all static data (Class 0); 1, 2 or 3 reads that event class.",
+            "maximum": 3,
+            "minimum": 0,
+            "title": "Event Class",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "outstation_address",
+          "event_class"
+        ],
+        "title": "poll_classArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_points",
+      "description": "List the aliases defined in the point map (POINT_MAP_FILE).\n\nInvalid entries are listed with an 'error' field. Does not contact any\noutstation.",
+      "inputSchema": {
+        "properties": {},
+        "title": "list_pointsArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ping",
+      "description": "Report the server's configuration: connection settings, write switch and point map.\n\nDoes not contact any outstation; use a read tool to check that a\ndevice answers.",
+      "inputSchema": {
+        "properties": {},
+        "title": "pingArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
+  "routes": {
+    "read_inputs": {
+      "selector": "source",
+      "options": {
+        "binary": "read_binary_inputs",
+        "analog": "read_analog_inputs",
+        "alias": "read_point_by_alias"
+      }
+    },
+    "control_binary_output": {
+      "selector": "target",
+      "options": {
+        "address": "write_binary_output",
+        "alias": "write_point_by_alias"
+      }
+    },
+    "poll_class": {
+      "handler": "poll_class"
+    },
+    "list_points": {
+      "handler": "list_points"
+    },
+    "ping": {
+      "handler": "ping"
+    }
+  },
+  "legacy": {
+    "read_binary_inputs": "read_inputs",
+    "read_analog_inputs": "read_inputs",
+    "read_point_by_alias": "read_inputs",
+    "write_binary_output": "control_binary_output",
+    "write_point_by_alias": "control_binary_output",
+    "poll_class": "poll_class",
+    "list_points": "list_points",
+    "ping": "ping"
+  },
+  "legacySchemas": {
+    "read_binary_inputs": {
+      "properties": {
+        "outstation_address": {
+          "description": "DNP3 link address of the outstation (0-65519).",
+          "maximum": 65519,
+          "minimum": 0,
+          "title": "Outstation Address",
+          "type": "integer"
+        },
+        "start_index": {
+          "description": "First point index to read.",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Start Index",
+          "type": "integer"
+        },
+        "count": {
+          "description": "Number of consecutive points to read (1-1000).",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "outstation_address",
+        "start_index",
+        "count"
+      ],
+      "title": "read_binary_inputsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_analog_inputs": {
+      "properties": {
+        "outstation_address": {
+          "description": "DNP3 link address of the outstation (0-65519).",
+          "maximum": 65519,
+          "minimum": 0,
+          "title": "Outstation Address",
+          "type": "integer"
+        },
+        "start_index": {
+          "description": "First point index to read.",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Start Index",
+          "type": "integer"
+        },
+        "count": {
+          "description": "Number of consecutive points to read (1-1000).",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "outstation_address",
+        "start_index",
+        "count"
+      ],
+      "title": "read_analog_inputsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_binary_output": {
+      "properties": {
+        "outstation_address": {
+          "description": "DNP3 link address of the outstation (0-65519).",
+          "maximum": 65519,
+          "minimum": 0,
+          "title": "Outstation Address",
+          "type": "integer"
+        },
+        "index": {
+          "description": "Point index of the binary output.",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Index",
+          "type": "integer"
+        },
+        "value": {
+          "description": "true latches the output ON, false latches it OFF. Pass a JSON boolean; the strings \"true\" and \"false\" are also accepted. Anything else is rejected.",
+          "title": "Value",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "outstation_address",
+        "index",
+        "value"
+      ],
+      "title": "write_binary_outputArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "poll_class": {
+      "properties": {
+        "outstation_address": {
+          "description": "DNP3 link address of the outstation (0-65519).",
+          "maximum": 65519,
+          "minimum": 0,
+          "title": "Outstation Address",
+          "type": "integer"
+        },
+        "event_class": {
+          "description": "0 reads all static data (Class 0); 1, 2 or 3 reads that event class.",
+          "maximum": 3,
+          "minimum": 0,
+          "title": "Event Class",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "outstation_address",
+        "event_class"
+      ],
+      "title": "poll_classArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "list_points": {
+      "properties": {},
+      "title": "list_pointsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_point_by_alias": {
+      "properties": {
+        "alias": {
+          "description": "Alias defined in the point map.",
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Alias",
+          "type": "string"
+        }
+      },
+      "required": [
+        "alias"
+      ],
+      "title": "read_point_by_aliasArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_point_by_alias": {
+      "properties": {
+        "alias": {
+          "description": "Alias defined in the point map.",
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Alias",
+          "type": "string"
+        },
+        "value": {
+          "description": "true latches the output ON, false latches it OFF. Pass a JSON boolean; the strings \"true\" and \"false\" are also accepted. Anything else is rejected.",
+          "title": "Value",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "alias",
+        "value"
+      ],
+      "title": "write_point_by_aliasArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "ping": {
+      "properties": {},
+      "title": "pingArguments",
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "resultSchema": {
+    "type": "object",
+    "required": [
+      "success",
+      "data",
+      "error",
+      "meta"
+    ],
+    "properties": {
+      "success": {
+        "type": "boolean"
+      },
+      "data": {},
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "meta": {
+        "type": "object"
+      }
+    },
+    "additionalProperties": false
+  },
+  "localStatusTools": [
+    "ping"
+  ]
+}

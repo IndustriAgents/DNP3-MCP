@@ -1,0 +1,31 @@
+{
+  "name": "industriagents-dnp3-mcp",
+  "version": "0.3.0",
+  "description": "Independent DNP3 MCP server; versioned Python wheel launcher (requires uv).",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "dnp3-mcp": "bin/cli.mjs"
+  },
+  "files": [
+    "bin/",
+    "vendor/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IndustriAgents/DNP3-MCP.git",
+    "directory": "npm"
+  },
+  "scripts": {
+    "test": "node --test",
+    "prepack": "python3 ../scripts/prepare_npm.py"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

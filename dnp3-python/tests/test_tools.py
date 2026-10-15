@@ -16,16 +16,7 @@ from dnp3_mcp.server import DNP3MCPServer
 
 pytestmark = pytest.mark.anyio
 
-TOOLS = {
-    "read_binary_inputs",
-    "read_analog_inputs",
-    "write_binary_output",
-    "poll_class",
-    "list_points",
-    "read_point_by_alias",
-    "write_point_by_alias",
-    "ping",
-}
+TOOLS = {"list_points", "poll_class", "ping", "control_binary_output", "read_inputs"}
 
 
 class FakeMaster(DNP3Master):
@@ -75,7 +66,7 @@ def build(
 async def call(server: DNP3MCPServer, tool: str, args: dict[str, Any]) -> dict[str, Any]:
     async with create_connected_server_and_client_session(server.mcp) as session:
         result = await session.call_tool(tool, args)
-    assert not result.isError, result.content
+    assert result.isError is (json.loads(result.content[0].text).get("success") is False), result.content
     envelope = json.loads(result.content[0].text)
     assert set(envelope) == {"success", "data", "error", "meta"}
     return envelope
@@ -97,21 +88,21 @@ async def test_every_tool_has_a_description_and_typed_schema(tmp_path: Path) -> 
     for tool in tools.values():
         assert tool.description and tool.description.strip(), tool.name
         assert "\n    " not in tool.description, tool.name  # docstring indentation is cleaned
-    schema = tools["read_binary_inputs"].inputSchema
+    schema = tools["read_inputs"].inputSchema["oneOf"][0]
     address = schema["properties"]["outstation_address"]
     assert (address["type"], address["minimum"], address["maximum"]) == ("integer", 0, 65519)
     assert "ge" not in address and "le" not in address  # standard JSON Schema keywords only
     assert (schema["properties"]["count"]["minimum"], schema["properties"]["count"]["maximum"]) == (1, 1000)
-    assert set(schema["required"]) == {"outstation_address", "start_index", "count"}
-    assert tools["write_binary_output"].inputSchema["properties"]["value"]["type"] == "boolean"
-    assert tools["write_point_by_alias"].inputSchema["properties"]["value"]["type"] == "boolean"
+    assert set(schema["required"]) == {"source", "outstation_address", "start_index", "count"}
+    assert tools["control_binary_output"].inputSchema["properties"]["value"]["type"] == "boolean"
+    assert tools["control_binary_output"].inputSchema["properties"]["value"]["type"] == "boolean"
 
 
 async def test_server_info_reports_the_package_version(tmp_path: Path) -> None:
     server, _ = build(tmp_path)
-    assert server.mcp._mcp_server.version == version("dnp3-mcp")
+    assert server.mcp._mcp_server.version == version("industriagents-dnp3-mcp")
     options = server.mcp._mcp_server.create_initialization_options()
-    assert options.server_version == version("dnp3-mcp") != version("mcp")
+    assert options.server_version == version("industriagents-dnp3-mcp") != version("mcp")
 
 
 async def test_writes_are_refused_by_default(tmp_path: Path) -> None:
@@ -263,7 +254,7 @@ async def test_ping_reports_one_configuration(tmp_path: Path) -> None:
     assert "writes_enabled" not in data["connection"]
     assert data["connection"]["connection_type"] == "tcp"
     assert data["point_aliases"] == 4
-    assert data["server_version"] == version("dnp3-mcp")
+    assert data["server_version"] == version("industriagents-dnp3-mcp")
     assert data["dnp3_library"] == f"dnp3py {version('dnp3py')}"
     assert master.calls == []
 
@@ -272,15 +263,15 @@ async def test_annotations_do_not_invite_retries(tmp_path: Path) -> None:
     server, _ = build(tmp_path)
     async with create_connected_server_and_client_session(server.mcp) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-    for name in ("write_binary_output", "write_point_by_alias", "poll_class"):
+    for name in ("control_binary_output", "control_binary_output", "poll_class"):
         hints = tools[name].annotations
         assert hints is not None, name
         assert (hints.readOnlyHint, hints.destructiveHint, hints.idempotentHint) == (False, True, False), name
-    for name in ("read_binary_inputs", "read_analog_inputs", "read_point_by_alias", "list_points", "ping"):
+    for name in ("read_inputs", "read_inputs", "read_inputs", "list_points", "ping"):
         hints = tools[name].annotations
         assert hints is not None and hints.readOnlyHint is True and hints.destructiveHint is False, name
     # Device reads confirm (so delete) any unsolicited data that arrives meanwhile.
-    for name in ("read_binary_inputs", "read_analog_inputs", "read_point_by_alias"):
+    for name in ("read_inputs", "read_inputs", "read_inputs"):
         assert tools[name].annotations.idempotentHint is False, name
     for name in ("list_points", "ping"):  # local only
         assert tools[name].annotations.idempotentHint is True, name
@@ -293,7 +284,7 @@ async def test_annotations_do_not_invite_retries(tmp_path: Path) -> None:
 )
 async def test_alias_write_failures_report_not_sent(tmp_path: Path, alias: str, problem: str) -> None:
     server, master = build(tmp_path, writes=True, point_map=POINTS)
-    envelope = await call(server, "write_point_by_alias", {"alias": alias, "value": True})
+    envelope = await call(server, "control_binary_output", {"target": "alias", "alias": alias, "value": True})
     assert envelope["success"] is False and problem in envelope["error"]
     assert (envelope["meta"]["outcome"], envelope["meta"]["request_sent"]) == ("not_sent", False)
     assert master.calls == []
@@ -303,8 +294,8 @@ async def test_alias_write_failures_report_not_sent(tmp_path: Path, alias: str, 
 async def test_unclassified_write_failures_are_unknown(tmp_path: Path, failure: Exception) -> None:
     server, _ = build(tmp_path, writes=True, point_map=POINTS, fail=failure)
     for tool, args in (
-        ("write_binary_output", {"outstation_address": 10, "index": 3, "value": True}),
-        ("write_point_by_alias", {"alias": "trip", "value": True}),
+        ("control_binary_output", {"target": "address", "outstation_address": 10, "index": 3, "value": True}),
+        ("control_binary_output", {"target": "alias", "alias": "trip", "value": True}),
     ):
         envelope = await call(server, tool, args)
         assert envelope["success"] is False

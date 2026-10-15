@@ -202,7 +202,9 @@ async def test_real_responder_cancel_in_the_lock_grant_step_keeps_the_server_ali
         responders.append(context.session._in_flight[context.request_id])
         return find_scope(mcp)
 
-    monkeypatch.setattr(tools, "request_cancel_scope", capture)
+    from dnp3_mcp.protocol import tools as protocol_tools
+
+    monkeypatch.setattr(protocol_tools, "request_cancel_scope", capture)
     arguments = {"outstation_address": OUTSTATION, "index": 3, "value": True}
     with caplog.at_level("WARNING", logger="dnp3_mcp.dnp3_master"):
         async with create_connected_server_and_client_session(server.mcp) as session:

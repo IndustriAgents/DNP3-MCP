@@ -71,7 +71,7 @@ def test_installed_package_has_no_implicit_env_file(tmp_path: Path) -> None:
     package.mkdir(parents=True)
     # Even with a dnp3-mcp pyproject.toml where a checkout would have one, site-packages is not src/.
     for directory in (package.parent, package.parent.parent):
-        (directory / "pyproject.toml").write_text('[project]\nname = "dnp3-mcp"\n')
+        (directory / "pyproject.toml").write_text('[project]\nname = "industriagents-dnp3-mcp"\n')
     assert cli.project_env_file(package / "cli.py") is None
 
 
@@ -80,7 +80,7 @@ def test_other_projects_are_not_mistaken_for_the_checkout(tmp_path: Path) -> Non
     package.mkdir(parents=True)
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "something-else"\n')
     assert cli.project_env_file(package / "cli.py") is None
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "dnp3-mcp"\n')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "industriagents-dnp3-mcp"\n')
     assert cli.project_env_file(package / "cli.py") == tmp_path / ".env"
 
 

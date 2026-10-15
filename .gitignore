@@ -25,3 +25,8 @@ Thumbs.db
 # CI lowest-dependency job artifacts
 .venv-lowest/
 floors.txt
+
+# Release artifacts
+npm/vendor/*.whl
+npm/*.tgz
+dist/

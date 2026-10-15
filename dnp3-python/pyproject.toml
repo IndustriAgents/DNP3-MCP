@@ -1,12 +1,13 @@
 [project]
-name = "dnp3-mcp"
-version = "0.1.0"
+name = "industriagents-dnp3-mcp"
+version = "0.3.0"
 description = "Model Context Protocol server for DNP3 SCADA networks."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "IndustriAgents", email = "hi@industriagents.com" }]
 dependencies = [
+    "jsonschema>=4.23,<5",
     "anyio>=4.5",
     # Pure-Python DNP3 (IEEE 1815-2012) master and outstation. Pinned exactly:
     # dnp3_master.py relies on its internals (Master.process_response,
@@ -15,8 +16,10 @@ dependencies = [
     # (tests/interop) before changing it.
     "dnp3py==0.6.0",
     # mcp 2.x renamed FastMCP and changed its API; this server targets 1.x.
+    # Contract wire errors require CallToolResult passthrough (tested on 1.22+).
     "mcp[cli]>=1.22.0,<2",
-    "pydantic>=2.11.0",
+    # The supported MCP 1.x floor uses typing helpers removed in Pydantic 2.13.
+    "pydantic>=2.11.0,<2.13",
     "python-dotenv>=1.1.0",
 ]
 
@@ -48,3 +51,6 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dnp3_mcp"]

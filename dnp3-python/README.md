@@ -1,3 +1,10 @@
+> **0.3.0 package and tool migration:** Install `industriagents-dnp3-mcp`
+> from npm (requires uv) or PyPI; the command remains `dnp3-mcp`.
+> The advertised catalog now contains **5 tools**. Older tool names in
+> the examples below remain compatibility calls. See the
+> [architecture and canonical tool guide](../docs/architecture.md)
+> and [release guide](../docs/release.md).
+
 # dnp3-python
 
 Python MCP server for DNP3. Built with `uv`, `mcp[cli]` (FastMCP) and the
