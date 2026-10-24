@@ -9,7 +9,6 @@ from typing import Any
 
 import anyio
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.stdio import stdio_server
 from mcp.shared.message import SessionMessage
 from mcp.types import ContentBlock
@@ -102,15 +101,19 @@ class EnvelopeFastMCP(FastMCP):
                 self.on_client_gone()
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Sequence[ContentBlock] | dict[str, Any]:
-        try:
-            return await super().call_tool(name, arguments)
-        except ToolError as exc:
-            if isinstance(exc.__cause__, ValidationError):
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None:
+            metadata = tool.fn_metadata
+            try:
+                metadata.arg_model.model_validate(metadata.pre_parse_json(arguments or {}))
+            except ValidationError as exc:
                 meta: dict[str, Any] = {"tool": name}
                 if name in WRITE_TOOLS:
                     meta.update(outcome="not_sent", request_sent=False)
-                return err(describe_validation_error(name, exc.__cause__), meta)
-            raise
+                return err(describe_validation_error(name, exc), meta)
+        # A ValidationError inside the handler can occur after a native send.
+        # Only the explicit pre-dispatch validation above proves not_sent.
+        return await super().call_tool(name, arguments)
 
 
 class DNP3MCPServer:

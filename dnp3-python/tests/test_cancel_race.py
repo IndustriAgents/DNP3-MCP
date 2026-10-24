@@ -234,3 +234,35 @@ async def test_real_responder_cancel_in_the_lock_grant_step_keeps_the_server_ali
     await anyio.sleep(0.2)
     assert not CONTROLS & set(outstation.functions())
     assert "nothing more will be sent (outcome not_sent, request_sent false)" in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["static", "event_poll"])
+async def test_read_cancelled_when_connection_completes_never_sends(operation, monkeypatch):
+    master = make_master(1)
+    scope = anyio.CancelScope()
+    sent = []
+    closed = []
+
+    async def open_then_cancel(self):
+        scope.cancel()
+
+    async def request(self, fragment):
+        # dnp3py can send before its next checkpoint. Observe invocation itself.
+        sent.append(fragment)
+        await anyio.lowlevel.checkpoint()
+
+    async def close(self):
+        closed.append(True)
+
+    monkeypatch.setattr(dnp3_master._Session, "open", open_then_cancel)
+    monkeypatch.setattr(dnp3_master._Session, "request", request)
+    monkeypatch.setattr(dnp3_master._Session, "close", close)
+    with scope:
+        if operation == "static":
+            await master.read_binary_inputs(OUTSTATION, 0, 1, request_scope=scope)
+        else:
+            await master.poll_class(OUTSTATION, 1, request_scope=scope)
+    assert scope.cancelled_caught
+    assert closed == [True]
+    assert sent == []
+    assert master._active == set()

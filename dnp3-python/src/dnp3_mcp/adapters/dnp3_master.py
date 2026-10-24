@@ -801,6 +801,9 @@ class DNP3Master:
             session = _Session(self, outstation, log, protect_solicited=protect_solicited)
             try:
                 await session.open()
+                # A cancellation/deadline may arrive in the connection-complete
+                # step, before dnp3py's next await. Polls can consume events too.
+                await self._before_send(scope, request_scope)
                 return await session.request(build(session))
             finally:
                 await session.close()
