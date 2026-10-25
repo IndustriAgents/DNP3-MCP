@@ -22,6 +22,7 @@ Only TCP is implemented. Serial is rejected when the configuration is read.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -227,7 +228,9 @@ class PointValue:
         out.update(
             {
                 "index": self.index,
-                "value": self.value,
+                "value": ("NaN" if math.isnan(self.value) else "Infinity" if self.value > 0 else "-Infinity")
+                if isinstance(self.value, float) and not math.isfinite(self.value)
+                else self.value,
                 "flags": self.flags,
                 "quality": quality_names(self.kind, self.flags),
                 "timestamp": self.timestamp.isoformat() if self.timestamp else None,
@@ -580,6 +583,29 @@ class DNP3Master:
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """READ analog inputs (g30, any variation) start..start+count-1."""
         return await self._read_static("analog_input", 30, outstation, start, count, request_scope)
+
+    async def read_points(
+        self,
+        kind: str,
+        outstation: int,
+        start: int,
+        count: int,
+        *,
+        request_scope: anyio.CancelScope | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Read a bounded static point range, including output status for readback."""
+        groups = {
+            "binary_input": 1,
+            "double_bit_input": 3,
+            "binary_output": 10,
+            "counter": 20,
+            "frozen_counter": 21,
+            "analog_input": 30,
+            "analog_output": 40,
+        }
+        if kind not in groups:
+            raise DNP3MasterError("Unsupported static point kind")
+        return await self._read_static(kind, groups[kind], outstation, start, count, request_scope)
 
     async def poll_class(
         self, outstation: int, event_class: int, *, request_scope: anyio.CancelScope | None = None

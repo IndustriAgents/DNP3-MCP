@@ -4,7 +4,8 @@ import anyio as anyio
 from mcp.server.fastmcp import FastMCP as FastMCP
 from mcp.types import ToolAnnotations as ToolAnnotations
 
-READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+# Static requests can confirm unsolicited events; they are not side-effect free.
+READ_ONLY = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 LOCAL_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 WRITES = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 CONSUMES_EVENTS = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)

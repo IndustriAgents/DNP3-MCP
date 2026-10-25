@@ -8,15 +8,26 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from dnp3_mcp.config import DNP3Config, ServerConfig
 from dnp3_mcp.dnp3_master import DNP3Master, DNP3MasterError
 from dnp3_mcp.server import DNP3MCPServer
 
+CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contract/tools.json").read_text())
+
+
+def validate_result(name, result):
+    canonical = CONTRACT["legacy"].get(name, name)
+    definition = next((tool for tool in CONTRACT["tools"] if tool["name"] == canonical), None)
+    if definition is not None:
+        Draft202012Validator(definition["outputSchema"]).validate(result)
+
+
 pytestmark = pytest.mark.anyio
 
-TOOLS = {"list_points", "poll_class", "ping", "control_binary_output", "read_inputs"}
+TOOLS = {"list_points", "poll_class", "ping", "control_binary_output", "read_inputs", "read_points"}
 
 
 class FakeMaster(DNP3Master):
@@ -41,6 +52,10 @@ class FakeMaster(DNP3Master):
     async def read_analog_inputs(self, outstation: int, start: int, count: int, *, request_scope: Any = None) -> Any:
         self._record("read_analog_inputs", outstation, start, count, request_scope=request_scope)
         return [{"index": start, "value": 1.5}], {"outstation": outstation}
+
+    async def read_points(self, kind, outstation, start, count, *, request_scope=None):
+        self._record("read_points", kind, outstation, start, count, request_scope=request_scope)
+        return [{"index": start, "value": True}], {"outstation": outstation}
 
     async def write_binary_output(self, outstation: int, index: int, value: bool, *, request_scope: Any = None) -> Any:
         self._record("write_binary_output", outstation, index, value, request_scope=request_scope)
@@ -69,6 +84,7 @@ async def call(server: DNP3MCPServer, tool: str, args: dict[str, Any]) -> dict[s
     assert result.isError is (json.loads(result.content[0].text).get("success") is False), result.content
     envelope = json.loads(result.content[0].text)
     assert set(envelope) == {"success", "data", "error", "meta"}
+    validate_result(tool, envelope)
     return envelope
 
 
@@ -209,7 +225,8 @@ async def test_alias_type_mismatches(tmp_path: Path) -> None:
     unknown = await call(server, "read_point_by_alias", {"alias": "nope"})
     assert unknown["success"] is False and "Unknown alias 'nope'" in unknown["error"]
     read_output = await call(server, "read_point_by_alias", {"alias": "trip"})
-    assert read_output["success"] is False and "poll_class" in read_output["error"]
+    assert read_output["success"] is True
+    assert master.calls.pop() == ("read_points", ("binary_output", 10, 3, 1))
     write_input = await call(server, "write_point_by_alias", {"alias": "breaker", "value": True})
     assert write_input["success"] is False and "cannot be written" in write_input["error"]
     assert master.calls == []
@@ -243,7 +260,8 @@ async def test_unexpected_exceptions_become_envelopes(tmp_path: Path) -> None:
     server, _ = build(tmp_path, fail=RuntimeError("boom"))
     envelope = await call(server, "poll_class", {"outstation_address": 10, "event_class": 1})
     assert envelope["success"] is False
-    assert envelope["error"] == "Unexpected error: RuntimeError: boom"
+    assert envelope["error"] == "Unexpected error while executing tool"
+    assert "boom" not in json.dumps(envelope)
 
 
 async def test_ping_reports_one_configuration(tmp_path: Path) -> None:
@@ -263,11 +281,11 @@ async def test_annotations_do_not_invite_retries(tmp_path: Path) -> None:
     server, _ = build(tmp_path)
     async with create_connected_server_and_client_session(server.mcp) as session:
         tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-    for name in ("control_binary_output", "control_binary_output", "poll_class"):
+    for name in ("control_binary_output", "read_inputs", "read_points", "poll_class"):
         hints = tools[name].annotations
         assert hints is not None, name
         assert (hints.readOnlyHint, hints.destructiveHint, hints.idempotentHint) == (False, True, False), name
-    for name in ("read_inputs", "read_inputs", "read_inputs", "list_points", "ping"):
+    for name in ("list_points", "ping"):
         hints = tools[name].annotations
         assert hints is not None and hints.readOnlyHint is True and hints.destructiveHint is False, name
     # Device reads confirm (so delete) any unsolicited data that arrives meanwhile.

@@ -45,7 +45,8 @@ TypeScript implementation: npm carries the same wheel as the PyPI release.
 
 | Advertised tool | Modes | Effect |
 |---|---|---|
-| `read_inputs` | `binary`, `analog`, `alias` | Read/local |
+| `read_inputs` | `binary`, `analog`, `alias` | May confirm unsolicited events |
+| `read_points` | Seven static point kinds | May confirm unsolicited events |
 | `control_binary_output` | `address`, `alias` | Changes state or consumes events |
 | `poll_class` | No mode selector | Changes state or consumes events |
 | `list_points` | No mode selector | Read/local |
@@ -147,7 +148,7 @@ A FIFO cannot block policy loading or audit admission while waiting for a peer.
 
 ## Protocol capability limits
 
-DNP3 binary/analog input reads, class polls and binary controls are implemented. Reads may confirm and consume unsolicited events; read-only annotations do not authorize retries. Select-before-operate and direct-operate remain separate configured control modes. OpenDNP3 interoperability is optional and is not established by the JSON mock.
+DNP3 supports seven static point kinds, class polls and binary controls. Static reads may confirm and consume unsolicited events and therefore advertise non-read-only annotations. Select-before-operate and direct-operate remain separate configured control modes. The Linux opendnp3 CI job checks independent-stack interoperability; local wire fixtures alone do not establish it.
 
 The read and event-poll path rechecks cancellation, shutdown and the overall
 deadline after connection establishment and immediately before dispatch. A
@@ -178,3 +179,11 @@ consolidated routes, unknown/mixed arguments, legacy-policy bypass, independent
 admission state, durable intent failure and MCP error envelopes. npm tests
 check the bundled version, argument boundaries, exit status and missing-uv
 errors. See [release.md](release.md) for the registry workflow.
+
+## Protocol capability review
+
+The [protocol research and capability matrix](protocol-research.md) records the
+2026-10-25 source review and supported scope. All canonical tools declare concrete
+data shapes in `contract/tools.json`; MCP tests validate actual results. Existing
+local diagnostics now expose backend support separately from native enablement
+and device verification. See the matrix for policy migration details.

@@ -2,10 +2,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from dnp3_mcp.domain.model import Alias, Count, OutstationAddress, StartIndex, err, ok
+from dnp3_mcp.domain.model import Alias, Count, OutstationAddress, PointKind, StartIndex, ok
 
 
 class ReadOperations:
+    async def read_points(
+        self, kind: PointKind, outstation_address: OutstationAddress, start_index: StartIndex, count: Count
+    ) -> dict:
+        request_scope = self.cancel_scope()
+
+        async def call() -> dict[str, Any]:
+            points, meta = await self.master.read_points(
+                kind, outstation_address, start_index, count, request_scope=request_scope
+            )
+            return ok({"outstation": outstation_address, "kind": kind, "points": points}, meta)
+
+        return await self.guarded("read_points", call)
+
     async def read_binary_inputs(
         self, outstation_address: OutstationAddress, start_index: StartIndex, count: Count
     ) -> dict:
@@ -43,15 +56,4 @@ class ReadOperations:
             return await self.read_binary_inputs(spec.outstation, spec.index, 1)
         if spec.type == "analog_input":
             return await self.read_analog_inputs(spec.outstation, spec.index, 1)
-        return err(
-            (
-                "Alias '"
-                f"{alias}"
-                "' is a "
-                f"{spec.type}"
-                "; reading it by alias is not supported. Use "
-                "poll_class with event_class 0 to see output "
-                "status."
-            ),
-            {"tool": "read_point_by_alias", "alias": alias},
-        )
+        return await self.read_points(spec.type, spec.outstation, spec.index, 1)

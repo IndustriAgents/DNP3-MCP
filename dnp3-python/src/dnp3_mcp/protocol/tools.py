@@ -4,7 +4,16 @@ import inspect
 from typing import Any
 
 from dnp3_mcp.application.resources import ToolResources
-from dnp3_mcp.domain.model import Alias, Count, EventClass, OutputValue, OutstationAddress, PointIndex, StartIndex
+from dnp3_mcp.domain.model import (
+    Alias,
+    Count,
+    EventClass,
+    OutputValue,
+    OutstationAddress,
+    PointIndex,
+    PointKind,
+    StartIndex,
+)
 
 from ..application.operations import Operations
 from .support import CONSUMES_EVENTS, LOCAL_ONLY, READ_ONLY, WRITES, FastMCP, ToolAnnotations, request_cancel_scope
@@ -44,6 +53,23 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
         received meanwhile is returned in meta.unsolicited.
         """
         return await operations.read_analog_inputs(outstation_address, start_index, count)
+
+    @tool(READ_ONLY)
+    async def read_points(
+        kind: PointKind, outstation_address: OutstationAddress, start_index: StartIndex, count: Count
+    ) -> dict:
+        """Read a bounded static range of inputs, output status, or counters.
+
+        kind selects binary_input (g1), double_bit_input (g3), binary_output
+        (g10), counter (g20), frozen_counter (g21), analog_input (g30), or
+        analog_output (g40). The outstation chooses the variation. Values carry
+        native quality flags and timestamps where supplied. No scaling is guessed.
+        Use binary_output after a control to observe output status; this is not
+        proof that a physical process has completed. Missing indexes fail with
+        returned_indexes metadata. Unsolicited events received during the read
+        may be confirmed and are preserved in meta.unsolicited.
+        """
+        return await operations.read_points(kind, outstation_address, start_index, count)
 
     @tool(WRITES)
     async def write_binary_output(outstation_address: OutstationAddress, index: PointIndex, value: OutputValue) -> dict:
@@ -92,7 +118,7 @@ def register_tools(server: FastMCP, resources: ToolResources) -> None:
 
     @tool(READ_ONLY)
     async def read_point_by_alias(alias: Alias) -> dict:
-        """Read one binary_input or analog_input point by its point-map alias.
+        """Read one supported static point by its point-map alias.
 
         Looks the alias up in POINT_MAP_FILE and reads that single point from
         its outstation, returning the same envelope as read_binary_inputs or

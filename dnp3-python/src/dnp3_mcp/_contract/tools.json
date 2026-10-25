@@ -157,8 +157,8 @@
         ]
       },
       "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
+        "readOnlyHint": false,
+        "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": true
       },
@@ -174,7 +174,62 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "outstation": {
+                    "type": "integer"
+                  },
+                  "points": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "index": {
+                          "type": "integer"
+                        },
+                        "value": {},
+                        "flags": {
+                          "type": "integer"
+                        },
+                        "quality": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "timestamp": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "index",
+                        "value"
+                      ]
+                    }
+                  },
+                  "kind": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outstation",
+                  "points"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -185,7 +240,279 @@
             "type": "object"
           }
         },
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "success": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "outstation": {
+                      "type": "integer"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "index": {
+                            "type": "integer"
+                          },
+                          "value": {},
+                          "flags": {
+                            "type": "integer"
+                          },
+                          "quality": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "timestamp": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "type": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "index",
+                          "value"
+                        ]
+                      }
+                    },
+                    "kind": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "outstation",
+                    "points"
+                  ]
+                },
+                "error": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "read_points",
+      "description": "Read a bounded range of static points. kind selects binary_input (g1), double_bit_input (g3), binary_output (g10), counter (g20), frozen_counter (g21), analog_input (g30), or analog_output (g40). Values include native quality and timestamps where supplied. Use binary_output to read back control status; status is not proof of physical process completion. Missing indexes fail. Unsolicited events received during a read may be confirmed and are preserved in meta.unsolicited. No units or scaling are inferred. Non-finite IEEE values are strings NaN, Infinity and -Infinity; raw quality flags remain unchanged.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "outstation_address": {
+            "description": "DNP3 link address of the outstation (0-65519).",
+            "maximum": 65519,
+            "minimum": 0,
+            "title": "Outstation Address",
+            "type": "integer"
+          },
+          "start_index": {
+            "description": "First point index to read.",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Start Index",
+            "type": "integer"
+          },
+          "count": {
+            "description": "Number of consecutive points to read (1-1000).",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Count",
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "binary_input",
+              "double_bit_input",
+              "binary_output",
+              "counter",
+              "frozen_counter",
+              "analog_input",
+              "analog_output"
+            ],
+            "description": "Static point type and corresponding DNP3 object group."
+          }
+        },
+        "required": [
+          "outstation_address",
+          "start_index",
+          "count",
+          "kind"
+        ],
         "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "outstation": {
+                    "type": "integer"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "points": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "index": {
+                          "type": "integer"
+                        },
+                        "value": {},
+                        "flags": {
+                          "type": "integer"
+                        },
+                        "quality": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "timestamp": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "index",
+                        "value"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "outstation",
+                  "kind",
+                  "points"
+                ]
+              }
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "success": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "outstation": {
+                      "type": "integer"
+                    },
+                    "kind": {
+                      "type": "string"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "index": {
+                            "type": "integer"
+                          },
+                          "value": {},
+                          "flags": {
+                            "type": "integer"
+                          },
+                          "quality": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "timestamp": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "type": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "index",
+                          "value"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "outstation",
+                    "kind",
+                    "points"
+                  ]
+                },
+                "error": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -320,7 +647,32 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "outstation": {
+                    "type": "integer"
+                  },
+                  "index": {
+                    "type": "integer"
+                  },
+                  "value": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "outstation",
+                  "index",
+                  "value"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -331,7 +683,44 @@
             "type": "object"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "success": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "outstation": {
+                      "type": "integer"
+                    },
+                    "index": {
+                      "type": "integer"
+                    },
+                    "value": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "outstation",
+                    "index",
+                    "value"
+                  ]
+                },
+                "error": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -380,7 +769,67 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "outstation": {
+                    "type": "integer"
+                  },
+                  "class": {
+                    "type": "integer"
+                  },
+                  "count": {
+                    "type": "integer"
+                  },
+                  "points": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "index": {
+                          "type": "integer"
+                        },
+                        "value": {},
+                        "flags": {
+                          "type": "integer"
+                        },
+                        "quality": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "timestamp": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "index",
+                        "value"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "outstation",
+                  "class",
+                  "count",
+                  "points"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -391,7 +840,79 @@
             "type": "object"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "success": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "outstation": {
+                      "type": "integer"
+                    },
+                    "class": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "index": {
+                            "type": "integer"
+                          },
+                          "value": {},
+                          "flags": {
+                            "type": "integer"
+                          },
+                          "quality": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "timestamp": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "type": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "index",
+                          "value"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "outstation",
+                    "class",
+                    "count",
+                    "points"
+                  ]
+                },
+                "error": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -421,7 +942,70 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "points": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "alias": {
+                          "type": "string"
+                        },
+                        "outstation": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "type": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "index": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "description": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "error": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "alias",
+                        "outstation",
+                        "type",
+                        "index",
+                        "description"
+                      ]
+                    }
+                  },
+                  "count": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "points",
+                  "count"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -432,7 +1016,82 @@
             "type": "object"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "success": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "alias": {
+                            "type": "string"
+                          },
+                          "outstation": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "type": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "index": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "description": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "error": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "alias",
+                          "outstation",
+                          "type",
+                          "index",
+                          "description"
+                        ]
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "points",
+                    "count"
+                  ]
+                },
+                "error": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -462,7 +1121,127 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "connection": {
+                    "type": "object"
+                  },
+                  "capabilities": {
+                    "type": "object",
+                    "properties": {
+                      "protocol": {
+                        "type": "string"
+                      },
+                      "backend": {
+                        "type": "string"
+                      },
+                      "simulated": {
+                        "type": "boolean"
+                      },
+                      "scope": {
+                        "const": "backend_support"
+                      },
+                      "device_verified": {
+                        "const": false
+                      },
+                      "operations": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "supported": {
+                              "type": "boolean"
+                            },
+                            "enabled": {
+                              "type": "boolean",
+                              "description": "Native config gate only; not policy, reachability or device permission."
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "supported",
+                            "enabled"
+                          ]
+                        }
+                      },
+                      "prerequisites": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "limitations": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "protocol",
+                      "backend",
+                      "simulated",
+                      "scope",
+                      "device_verified",
+                      "operations",
+                      "prerequisites",
+                      "limitations"
+                    ]
+                  },
+                  "writes_enabled": {
+                    "type": "boolean"
+                  },
+                  "point_aliases": {
+                    "type": "integer"
+                  },
+                  "point_map": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "error": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "error"
+                    ]
+                  },
+                  "server_version": {
+                    "type": "string"
+                  },
+                  "dnp3_library": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "connection",
+                  "capabilities",
+                  "writes_enabled",
+                  "point_aliases",
+                  "point_map",
+                  "server_version",
+                  "dnp3_library"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -473,7 +1252,139 @@
             "type": "object"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "success": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "connection": {
+                      "type": "object"
+                    },
+                    "capabilities": {
+                      "type": "object",
+                      "properties": {
+                        "protocol": {
+                          "type": "string"
+                        },
+                        "backend": {
+                          "type": "string"
+                        },
+                        "simulated": {
+                          "type": "boolean"
+                        },
+                        "scope": {
+                          "const": "backend_support"
+                        },
+                        "device_verified": {
+                          "const": false
+                        },
+                        "operations": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                              "supported": {
+                                "type": "boolean"
+                              },
+                              "enabled": {
+                                "type": "boolean",
+                                "description": "Native config gate only; not policy, reachability or device permission."
+                              },
+                              "reason": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "supported",
+                              "enabled"
+                            ]
+                          }
+                        },
+                        "prerequisites": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "limitations": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "protocol",
+                        "backend",
+                        "simulated",
+                        "scope",
+                        "device_verified",
+                        "operations",
+                        "prerequisites",
+                        "limitations"
+                      ]
+                    },
+                    "writes_enabled": {
+                      "type": "boolean"
+                    },
+                    "point_aliases": {
+                      "type": "integer"
+                    },
+                    "point_map": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "error": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "error"
+                      ]
+                    },
+                    "server_version": {
+                      "type": "string"
+                    },
+                    "dnp3_library": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "connection",
+                    "capabilities",
+                    "writes_enabled",
+                    "point_aliases",
+                    "point_map",
+                    "server_version",
+                    "dnp3_library"
+                  ]
+                },
+                "error": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
       }
     }
   ],
@@ -484,23 +1395,32 @@
         "binary": "read_binary_inputs",
         "analog": "read_analog_inputs",
         "alias": "read_point_by_alias"
-      }
+      },
+      "resultShape": "read_inputs"
     },
     "control_binary_output": {
       "selector": "target",
       "options": {
         "address": "write_binary_output",
         "alias": "write_point_by_alias"
-      }
+      },
+      "resultShape": "control_binary_output"
     },
     "poll_class": {
-      "handler": "poll_class"
+      "handler": "poll_class",
+      "resultShape": "poll_class"
     },
     "list_points": {
-      "handler": "list_points"
+      "handler": "list_points",
+      "resultShape": "list_points"
     },
     "ping": {
-      "handler": "ping"
+      "handler": "ping",
+      "resultShape": "ping"
+    },
+    "read_points": {
+      "handler": "read_points",
+      "resultShape": "read_points"
     }
   },
   "legacy": {
@@ -687,6 +1607,52 @@
       "title": "pingArguments",
       "type": "object",
       "additionalProperties": false
+    },
+    "read_points": {
+      "type": "object",
+      "properties": {
+        "outstation_address": {
+          "description": "DNP3 link address of the outstation (0-65519).",
+          "maximum": 65519,
+          "minimum": 0,
+          "title": "Outstation Address",
+          "type": "integer"
+        },
+        "start_index": {
+          "description": "First point index to read.",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Start Index",
+          "type": "integer"
+        },
+        "count": {
+          "description": "Number of consecutive points to read (1-1000).",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "binary_input",
+            "double_bit_input",
+            "binary_output",
+            "counter",
+            "frozen_counter",
+            "analog_input",
+            "analog_output"
+          ],
+          "description": "Static point type and corresponding DNP3 object group."
+        }
+      },
+      "required": [
+        "outstation_address",
+        "start_index",
+        "count",
+        "kind"
+      ],
+      "additionalProperties": false
     }
   },
   "resultSchema": {
@@ -721,5 +1687,350 @@
     "maxNestingDepth": 32,
     "maxContainerItems": 10000,
     "maxTotalValues": 50000
+  },
+  "resultShapes": {
+    "read_inputs": {
+      "type": "object",
+      "properties": {
+        "outstation": {
+          "type": "integer"
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer"
+              },
+              "value": {},
+              "flags": {
+                "type": "integer"
+              },
+              "quality": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "timestamp": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "index",
+              "value"
+            ]
+          }
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "outstation",
+        "points"
+      ]
+    },
+    "read_points": {
+      "type": "object",
+      "properties": {
+        "outstation": {
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer"
+              },
+              "value": {},
+              "flags": {
+                "type": "integer"
+              },
+              "quality": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "timestamp": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "index",
+              "value"
+            ]
+          }
+        }
+      },
+      "required": [
+        "outstation",
+        "kind",
+        "points"
+      ]
+    },
+    "control_binary_output": {
+      "type": "object",
+      "properties": {
+        "outstation": {
+          "type": "integer"
+        },
+        "index": {
+          "type": "integer"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "outstation",
+        "index",
+        "value"
+      ]
+    },
+    "poll_class": {
+      "type": "object",
+      "properties": {
+        "outstation": {
+          "type": "integer"
+        },
+        "class": {
+          "type": "integer"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer"
+              },
+              "value": {},
+              "flags": {
+                "type": "integer"
+              },
+              "quality": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "timestamp": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "index",
+              "value"
+            ]
+          }
+        }
+      },
+      "required": [
+        "outstation",
+        "class",
+        "count",
+        "points"
+      ]
+    },
+    "list_points": {
+      "type": "object",
+      "properties": {
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "alias": {
+                "type": "string"
+              },
+              "outstation": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "index": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "alias",
+              "outstation",
+              "type",
+              "index",
+              "description"
+            ]
+          }
+        },
+        "count": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "points",
+        "count"
+      ]
+    },
+    "ping": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "object"
+        },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "protocol": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "simulated": {
+              "type": "boolean"
+            },
+            "scope": {
+              "const": "backend_support"
+            },
+            "device_verified": {
+              "const": false
+            },
+            "operations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "supported": {
+                    "type": "boolean"
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "description": "Native config gate only; not policy, reachability or device permission."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "supported",
+                  "enabled"
+                ]
+              }
+            },
+            "prerequisites": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "limitations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "protocol",
+            "backend",
+            "simulated",
+            "scope",
+            "device_verified",
+            "operations",
+            "prerequisites",
+            "limitations"
+          ]
+        },
+        "writes_enabled": {
+          "type": "boolean"
+        },
+        "point_aliases": {
+          "type": "integer"
+        },
+        "point_map": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "error"
+          ]
+        },
+        "server_version": {
+          "type": "string"
+        },
+        "dnp3_library": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "capabilities",
+        "writes_enabled",
+        "point_aliases",
+        "point_map",
+        "server_version",
+        "dnp3_library"
+      ]
+    }
   }
 }

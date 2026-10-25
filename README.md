@@ -363,3 +363,9 @@ vulnerability privately. Please do not open a public issue for one.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Protocol support and verification
+
+See [protocol research and capability matrix](docs/protocol-research.md) for source evidence,
+implemented tool coverage, policy changes, test requirements and remaining limitations.
+The local status tool exposes `capabilities`; backend support does not establish device permission or reachability.
