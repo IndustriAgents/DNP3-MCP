@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BeforeValidator, Field, StrictBool, StrictInt
 
@@ -10,7 +10,24 @@ from dnp3_mcp.config import MAX_LINK_ADDRESS
 from dnp3_mcp.domain.errors import MAX_POINT_INDEX, MAX_READ_COUNT
 
 logger = logging.getLogger(__name__)
-POINT_TYPES = ("binary_input", "analog_input", "binary_output")
+PointKind = Literal[
+    "binary_input",
+    "double_bit_input",
+    "binary_output",
+    "counter",
+    "frozen_counter",
+    "analog_input",
+    "analog_output",
+]
+POINT_TYPES = (
+    "binary_input",
+    "double_bit_input",
+    "binary_output",
+    "counter",
+    "frozen_counter",
+    "analog_input",
+    "analog_output",
+)
 
 
 def envelope(

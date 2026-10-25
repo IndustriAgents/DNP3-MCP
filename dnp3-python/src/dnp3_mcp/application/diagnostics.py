@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from dnp3_mcp.domain.capabilities import capabilities
 from dnp3_mcp.domain.errors import DNP3MasterError
 from dnp3_mcp.domain.model import EventClass, OutstationAddress, err, logger, ok
 
@@ -16,9 +17,9 @@ class DiagnosticsOperations:
                 meta.update(outcome="unknown", request_sent=True)
             return err(str(exc), meta)
         except Exception as exc:
-            logger.exception("Unexpected error in %s", tool)
+            logger.error("Unexpected error in %s (%s)", tool, type(exc).__name__)
             meta = {"tool": tool}
-            message = f"Unexpected error: {type(exc).__name__}: {exc}"
+            message = "Unexpected error while executing tool"
             if write:
                 meta.update(outcome="unknown", request_sent=True)
                 message += ". The control may have been applied; read the output's state back before retrying."
@@ -39,6 +40,7 @@ class DiagnosticsOperations:
         return ok(
             {
                 "connection": self.master.connection_status(),
+                "capabilities": capabilities(self.master.config.writes_enabled),
                 "writes_enabled": self.master.config.writes_enabled,
                 "point_aliases": self.point_map.count(),
                 "point_map": {

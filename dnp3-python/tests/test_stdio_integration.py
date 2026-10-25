@@ -19,11 +19,22 @@ from typing import Any
 import anyio
 import pytest
 from dnp3.core.enums import FunctionCode
+from jsonschema import Draft202012Validator
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from .conftest import MOCK_OUTSTATION_ADDRESS as OUTSTATION
 from .conftest import Received, crob_echo
+
+CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contract/tools.json").read_text())
+
+
+def validate_result(name, result):
+    canonical = CONTRACT["legacy"].get(name, name)
+    definition = next((tool for tool in CONTRACT["tools"] if tool["name"] == canonical), None)
+    if definition is not None:
+        Draft202012Validator(definition["outputSchema"]).validate(result)
+
 
 pytestmark = pytest.mark.anyio
 
@@ -68,10 +79,12 @@ async def test_mcp_session_against_the_mock(mock_process: int, tmp_path: Path) -
         assert init.serverInfo.version == version("industriagents-dnp3-mcp")
 
         tools = (await session.list_tools()).tools
-        assert len(tools) == 5 and all(tool.description for tool in tools)
+        assert len(tools) == 6 and all(tool.description for tool in tools)
 
         async def call(tool: str, **arguments: Any) -> dict[str, Any]:
-            return envelope_of(await session.call_tool(tool, arguments))
+            value = envelope_of(await session.call_tool(tool, arguments))
+            validate_result(tool, value)
+            return value
 
         ping = await call("ping")
         assert ping["success"] and ping["data"]["writes_enabled"] is True
@@ -154,6 +167,7 @@ ALL_TOOL_CALLS = [
     ("write_point_by_alias", {"alias": "trip", "value": False}),
     ("read_binary_inputs", {"outstation_address": "ten", "start_index": 0, "count": 1}),  # invalid arguments
     ("nope", {}),  # unknown tool
+    ("read_points", {"kind": "binary_output", "outstation_address": OUTSTATION, "start_index": 3, "count": 1}),
 ]
 
 
@@ -253,7 +267,7 @@ def test_stdout_carries_only_json_rpc(mock_process: int, tmp_path: Path) -> None
     def envelope(number: int) -> dict[str, Any]:
         return json.loads(responses[number]["result"]["content"][0]["text"])
 
-    called = {"read_inputs", "control_binary_output", "poll_class", "list_points", "ping"}
+    called = {"read_inputs", "read_points", "control_binary_output", "poll_class", "list_points", "ping"}
     assert {tool["name"] for tool in responses[1]["result"]["tools"]} == called  # every tool was called
     by_name = {number: name for number, (name, _) in enumerate(ALL_TOOL_CALLS, start=2)}
     for number, name in by_name.items():
@@ -278,7 +292,7 @@ async def test_starts_and_answers_without_a_device(closed_port: int, tmp_path: P
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
-        assert len((await session.list_tools()).tools) == 5
+        assert len((await session.list_tools()).tools) == 6
         assert envelope_of(await session.call_tool("ping", {}))["success"] is True
         read_result = envelope_of(
             await session.call_tool("read_binary_inputs", {"outstation_address": 10, "start_index": 0, "count": 1})

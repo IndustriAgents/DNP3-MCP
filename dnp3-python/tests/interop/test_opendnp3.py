@@ -321,3 +321,31 @@ def test_opendnp3_master_against_the_mock(mock_process: int) -> None:
         assert soe.values[("BinaryOutputStatus", 6)] is True
     finally:
         manager.Shutdown()
+
+
+@pytest.mark.anyio
+async def test_read_points_interoperates_with_independent_static_groups(opendnp3_outstation):
+    """New point tool uses real independently encoded output/counter/double-bit data."""
+    station = opendnp3_outstation
+    station.update(
+        (opendnp3.BinaryOutputStatus(True), 3),
+        (opendnp3.AnalogOutputStatus(123.0), 3),
+        (opendnp3.Counter(7654), 3),
+        (opendnp3.DoubleBitBinary(opendnp3.DoubleBit.DETERMINED_ON), 3),
+    )
+    master = make_master(station.port)
+    expected = {
+        "binary_input": True,
+        "analog_input": 30.0,
+        "binary_output": True,
+        "analog_output": 123.0,
+        "counter": 7654,
+        "double_bit_input": "ON",
+    }
+    for kind, value in expected.items():
+        points, meta = await master.read_points(kind, OUTSTATION, 3, 1)
+        assert points[0]["value"] == value, (kind, points, meta)
+        assert points[0]["index"] == 3 and meta["attempts"] == 1
+    # Frozen counter values start at zero in the independent database.
+    frozen, _ = await master.read_points("frozen_counter", OUTSTATION, 3, 1)
+    assert frozen[0]["value"] == 0

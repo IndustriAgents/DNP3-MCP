@@ -1,6 +1,6 @@
 > **0.3.0 package and tool migration:** Install `industriagents-dnp3-mcp`
 > from npm (requires uv) or PyPI; the command remains `dnp3-mcp`.
-> The advertised catalog now contains **5 tools**. Older tool names in
+> The advertised catalog now contains **6 tools**. Older tool names in
 > the examples below remain compatibility calls. See the
 > [architecture and canonical tool guide](docs/architecture.md)
 > and [release guide](docs/release.md).
@@ -18,7 +18,8 @@ repository follows the same layout as the Modbus, S7comm and EtherCAT servers
 in the [IndustriConnect](https://github.com/IndustriAgents/IndustriConnect)
 suite.
 
-> **Read-only by default.** Controls (CROBs) are refused unless you set
+> **Physical controls disabled by default.** Static reads and polls can confirm
+> unsolicited events; explicit read-only policy blocks them. Controls (CROBs) are refused unless you set
 > `DNP3_WRITES_ENABLED=true`. When they are enabled, a control is reported as
 > successful only if the outstation answers with status `SUCCESS`. See
 > [SECURITY.md](SECURITY.md) before pointing the server at real equipment.
@@ -42,7 +43,7 @@ DNP3-MCP/                    # shipped inside IndustriConnect as DNP3-Project/
   opens a connection, resets the link, runs its exchange and closes again.
   dnp3py is young (a 0.x beta from a single maintainer); see
   [About dnp3py](#about-dnp3py) for what that means and how it is contained.
-- Tools for binary and analog input reads, binary output controls
+- Tools for seven static point kinds (including targeted output/counter readback), binary output controls
   (select-before-operate or direct operate), Class 0/1/2/3 polls and a `ping`
   diagnostic, all returning the suite's `{ success, data, error, meta }`
   envelope. `meta.iin` carries the outstation's internal indications.
@@ -57,8 +58,7 @@ DNP3-MCP/                    # shipped inside IndustriConnect as DNP3-Project/
   outputs that answers real DNP3 requests, including controls and event polls.
 
 Not implemented: serial links (use a serial-to-TCP gateway), DNP3 Secure
-Authentication, TLS, counters and analog outputs as dedicated tools (they do
-appear in Class 0 polls), time synchronisation, file transfer, and enabling
+Authentication, TLS, analog output commands, time synchronisation, file transfer, and enabling
 unsolicited reporting.
 
 ## Install
@@ -130,12 +130,13 @@ npx @modelcontextprotocol/inspector uv run dnp3-mcp
 |------|-----------|--------------|
 | `read_binary_inputs` | `outstation_address`, `start_index`, `count` | READ group 1 for the range; fails if any index is missing |
 | `read_analog_inputs` | `outstation_address`, `start_index`, `count` | READ group 30 for the range; fails if any index is missing |
+| `read_points` | `kind`, `outstation_address`, `start_index`, `count` | Bounded static range of binary/double-bit/analog inputs, binary/analog output status, counters or frozen counters |
 | `write_binary_output` | `outstation_address`, `index`, `value` | CROB LATCH_ON (`true`) or LATCH_OFF (`false`) on index 0-65535; refused unless `DNP3_WRITES_ENABLED=true`; succeeds only when the outstation echoes the control unchanged with status `SUCCESS` |
 | `poll_class` | `outstation_address`, `event_class` | `0`: all static data; `1`-`3`: that event class. **Destructive**: the events are confirmed, so the outstation deletes them (see below) |
 | `list_points` | none | Lists the point-map aliases, flagging invalid entries |
-| `read_point_by_alias` | `alias` | Reads a `binary_input` or `analog_input` alias |
+| `read_point_by_alias` | `alias` | Reads any supported static point type by alias |
 | `write_point_by_alias` | `alias`, `value` | Operates a `binary_output` alias; same gate and checks as `write_binary_output` |
-| `ping` | none | Configuration only (connection settings, write switch, point map, versions); does not contact an outstation |
+| `ping` | none | Local configuration and backend capabilities (connection settings, write switch, point map, versions); does not contact an outstation |
 
 Arguments are strict. Addresses, indexes, counts and classes must be JSON
 integers (not booleans, strings or floats); `count` is 1-1000. `value` must be
@@ -145,13 +146,13 @@ comes back as `{ index, value, flags, quality, timestamp }`, where `quality`
 lists the flag names (for example `ONLINE`) and `timestamp` is set only when
 the device sent one.
 
-Tool annotations say which tools change something: the two write tools and
-`poll_class` are marked destructive and not idempotent; the read tools,
-`list_points` and `ping` are marked read-only. The device read tools
-(`read_binary_inputs`, `read_analog_inputs`, `read_point_by_alias`) are also
-marked not idempotent: they change no point, but any unsolicited data the
-outstation pushes while they run is confirmed, which deletes those events on
-the outstation (they are returned in `meta.unsolicited`).
+Tool annotations mark controls, polls and device reads as non-read-only,
+destructive and not idempotent. Static reads can confirm unsolicited events,
+which removes them from the outstation (returned in `meta.unsolicited`). Explicit
+policy `read_only:true` blocks these operations. To permit observations, allow
+selected read operations with `read_only:false` while keeping
+`DNP3_WRITES_ENABLED=false` to block physical controls. `list_points` and `ping`
+remain local read-only tools.
 
 Controls put the result in `meta` as well as in the text:
 
@@ -248,7 +249,8 @@ loaded.
 ### Point map
 
 `POINT_MAP_FILE` points at a JSON object mapping an alias to a point. `type` is
-one of `binary_input`, `analog_input` or `binary_output`; `outstation` and
+one of `binary_input`, `double_bit_input`, `binary_output`, `counter`,
+`frozen_counter`, `analog_input` or `analog_output`; `outstation` and
 `index` must be integers. The file is re-read when it changes. Invalid entries
 are reported by `list_points` and refused by the alias tools.
 
@@ -363,3 +365,9 @@ vulnerability privately. Please do not open a public issue for one.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Protocol support and verification
+
+See [protocol research and capability matrix](docs/protocol-research.md) for source evidence,
+implemented tool coverage, policy changes, test requirements and remaining limitations.
+The local status tool exposes `capabilities`; backend support does not establish device permission or reachability.

@@ -37,7 +37,7 @@ def test_malformed_entries_are_recorded_not_raised(tmp_path: Path) -> None:
             "words": {"outstation": "ten", "type": "binary_input", "index": 0},
             "no_index": {"outstation": 10, "type": "analog_input"},
             "bool_index": {"outstation": 10, "type": "analog_input", "index": True},
-            "bad_type": {"outstation": 10, "type": "counter", "index": 1},
+            "bad_type": {"outstation": 10, "type": "unsupported_type", "index": 1},
             "too_big": {"outstation": 70000, "type": "binary_output", "index": 1},
             "not_object": 5,
         },
