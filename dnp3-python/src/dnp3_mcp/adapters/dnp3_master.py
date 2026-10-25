@@ -53,6 +53,15 @@ from ..domain.errors import DNP3MasterError as DNP3MasterError
 
 logger = logging.getLogger(__name__)
 CLASS_DATA_GROUP = 60
+MAX_CALL_FRAGMENTS = 128
+MAX_CALL_RAW_BYTES = 256 * 1024
+MAX_CALL_POINTS = 4096
+
+
+def response_limits() -> dict[str, int]:
+    return {"fragments": MAX_CALL_FRAGMENTS, "raw_bytes": MAX_CALL_RAW_BYTES, "points": MAX_CALL_POINTS}
+
+
 REQUEST_ERROR_IIN = IIN.NO_FUNC_CODE_SUPPORT | IIN.OBJECT_UNKNOWN | IIN.PARAMETER_ERROR | IIN.ALREADY_EXECUTING
 _QUALITY_FLAGS: dict[str, type] = {
     "binary_input": BinaryQuality,
@@ -266,12 +275,34 @@ class _CallLog:
     values: list[PointValue] = field(default_factory=list)
     fragments: list[_Fragment] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    raw_bytes: int = 0
+
+    def exceeded(self, resource: str) -> DNP3ProtocolError:
+        return DNP3ProtocolError(
+            f"DNP3 response {resource} budget exhausted; the overflowing fragment was not confirmed",
+            {
+                "code": "response_limit",
+                "incomplete": True,
+                "retried": False,
+                "response_budget": {
+                    "fragments": len(self.fragments),
+                    "raw_bytes": self.raw_bytes,
+                    "points": len(self.values),
+                    "limits": response_limits(),
+                },
+            },
+        )
 
     @property
     def current(self) -> int:
         return self.fragments[-1].number if self.fragments else 0
 
     def begin_fragment(self, raw: bytes) -> _Fragment:
+        if len(self.fragments) >= MAX_CALL_FRAGMENTS:
+            raise self.exceeded("fragment-count")
+        if self.raw_bytes + len(raw) > MAX_CALL_RAW_BYTES:
+            raise self.exceeded("raw-byte")
+        self.raw_bytes += len(raw)
         fragment = _Fragment(number=len(self.fragments) + 1, raw=raw)
         self.fragments.append(fragment)
         return fragment
@@ -333,6 +364,8 @@ class _Collector:
         self._log = log
 
     def _add(self, kind: str, values: list[Any], info: ResponseInfo, convert: Callable[[Any], Any]) -> None:
+        if len(self._log.values) + len(values) > MAX_CALL_POINTS:
+            raise self._log.exceeded("point-count")
         for v in values:
             point = PointValue(
                 kind=kind,
@@ -382,8 +415,8 @@ class _CapturingMaster(Master):
 
     def process_response(self, data: bytes) -> ResponseInfo | None:
         raw = bytes(data)
-        self.fragments.append(raw)
         fragment = self.log.begin_fragment(raw)
+        self.fragments.append(raw)
         info = super().process_response(data)
         self.last_info = info
         self.log.finish_fragment(fragment, info)
@@ -767,6 +800,7 @@ class DNP3Master:
             "timeout_ms": cfg.timeout_ms,
             "max_retries": cfg.max_retries,
             "control_mode": cfg.control_mode,
+            "response_limits": response_limits(),
         }
 
     async def close(self) -> None:
@@ -1003,6 +1037,11 @@ class DNP3Master:
         except (DNP3TimeoutError, DNP3ConnectionError) as exc:
             raise DNP3ControlError(
                 f"{function} for binary output {index}: {exc}. {tail}", {**sent_meta, "outcome": unanswered}
+            ) from exc
+        except DNP3MasterError as exc:
+            raise DNP3ControlError(
+                f"{function} for binary output {index}: {exc}. {tail}",
+                {**exc.meta, **sent_meta, "outcome": unanswered},
             ) from exc
         except Exception as exc:
             raise DNP3ControlError(

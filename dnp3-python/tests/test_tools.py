@@ -271,6 +271,11 @@ async def test_ping_reports_one_configuration(tmp_path: Path) -> None:
     assert data["writes_enabled"] is True
     assert "writes_enabled" not in data["connection"]
     assert data["connection"]["connection_type"] == "tcp"
+    assert data["connection"]["response_limits"] == {
+        "fragments": 128,
+        "raw_bytes": 262144,
+        "points": 4096,
+    }
     assert data["point_aliases"] == 4
     assert data["server_version"] == version("industriagents-dnp3-mcp")
     assert data["dnp3_library"] == f"dnp3py {version('dnp3py')}"

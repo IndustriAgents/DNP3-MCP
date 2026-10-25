@@ -60,3 +60,31 @@ validate observed results; package smoke checks metadata parity and capabilities
 in an isolated loopback configuration. Local macOS skips the opendnp3 module
 because yadnp3 wheels are unavailable here; the existing required Linux CI job
 runs it with `REQUIRE_OPENDNP3=1` and the new static-group case.
+
+## Second review: response budgets (2026-10-25)
+
+The [pinned dnp3py TCP runner](https://raw.githubusercontent.com/craigpnnl/dnp3py/7275b367dd8c48caf74f27d0e8269846f6cd622a/src/dnp3/master/tcp_runner.py)
+provides native fragment/reassembly and solicited-burst limits, but our call log
+also spans unsolicited traffic and retries. The adapter now bounds that entire
+call to 128 retained fragments, 256 KiB of raw fragment data and 4096 decoded
+points. Fragment admission precedes owned retention and parsing; point admission
+precedes callback retention and CONFIRM. Upstream transport/parser allocations
+remain outside this retained-state budget; it is not a total heap bound.
+
+Exhaustion produces `meta.code: response_limit`, `incomplete:true`, budget details
+and no retry of that failure. The overflowing fragment is not confirmed. Earlier
+confirmed solicited events remain in `meta.confirmed_events`, and confirmed
+unsolicited data remains in `meta.unsolicited`. Control errors preserve the sent
+stage: SELECT exhaustion prevents OPERATE; exhaustion after DIRECT_OPERATE or
+OPERATE remains unknown. The limits are visible through local ping connection
+metadata. Wire regressions verify each budget, confirmation counts, preserved
+event prefixes and control outcomes.
+
+Prioritized remaining roadmap:
+
+1. Add explicit timestamp validity and time-quality metadata for observations.
+2. Expand independently verified static/event variation coverage before adding controls.
+3. Design persistent unsolicited ownership and durable delivery before subscription tools.
+
+Analog controls, Secure Authentication, TLS/serial and physical-device profiles
+remain outside this implementation's supported scope.

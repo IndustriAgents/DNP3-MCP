@@ -371,3 +371,5 @@ MIT, see [LICENSE](LICENSE).
 See [protocol research and capability matrix](docs/protocol-research.md) for source evidence,
 implemented tool coverage, policy changes, test requirements and remaining limitations.
 The local status tool exposes `capabilities`; backend support does not establish device permission or reachability.
+
+Responses now have aggregate per-call fragment, byte and point budgets; exhaustion preserves confirmed data and never retries or confirms overflowing fragments. Details and the remaining roadmap are in [protocol research](docs/protocol-research.md).
