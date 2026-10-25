@@ -5,7 +5,7 @@
   "tools": [
     {
       "name": "read_inputs",
-      "description": "Select one source mode and provide only its parameters.\n\nbinary: Read binary inputs (DNP3 group 1) from an outstation.\n\nReads indexes start_index to start_index + count - 1 over a fresh TCP\nconnection to DNP3_HOST:DNP3_PORT. Each point has its value, its flag\noctet, the decoded quality flags and a timestamp when the device sent\none. Fails if the outstation does not return every requested index.\nAny unsolicited data the outstation pushes meanwhile is confirmed (so it\nis removed from the outstation) and returned in meta.unsolicited.\n\nanalog: Read analog inputs (DNP3 group 30) from an outstation.\n\nReads indexes start_index to start_index + count - 1 over a fresh TCP\nconnection to DNP3_HOST:DNP3_PORT. Values are returned as the device\nencodes them (integer or floating point variations, unscaled). Fails if\nthe outstation does not return every requested index. Unsolicited data\nreceived meanwhile is returned in meta.unsolicited.\n\nalias: Read one binary_input or analog_input point by its point-map alias.\n\nLooks the alias up in POINT_MAP_FILE and reads that single point from\nits outstation, returning the same envelope as read_binary_inputs or\nread_analog_inputs.",
+      "description": "Select one source mode and provide only its parameters.\n\nbinary: Read binary inputs (DNP3 group 1) from an outstation.\n\nReads indexes start_index to start_index + count - 1 over a fresh TCP\nconnection to DNP3_HOST:DNP3_PORT. Each point has its value, its flag\noctet, the decoded quality flags and a timestamp when the device sent\none. Fails if the outstation does not return every requested index.\nAny unsolicited data the outstation pushes meanwhile is confirmed (so it\nis removed from the outstation) and returned in meta.unsolicited.\n\nanalog: Read analog inputs (DNP3 group 30) from an outstation.\n\nReads indexes start_index to start_index + count - 1 over a fresh TCP\nconnection to DNP3_HOST:DNP3_PORT. Values are returned as the device\nencodes them (integer or floating point variations, unscaled). Fails if\nthe outstation does not return every requested index. Unsolicited data\nreceived meanwhile is returned in meta.unsolicited.\n\nalias: Read one binary_input or analog_input point by its point-map alias.\n\nLooks the alias up in POINT_MAP_FILE and reads that single point from\nits outstation, returning the same envelope as read_binary_inputs or\nread_analog_inputs. Each call retains at most 128 response fragments, 256 KiB raw response bytes and 4096 points across attempts and unsolicited traffic. Exhaustion returns incomplete response_limit metadata without confirming the overflowing fragment or retrying; already-confirmed events are preserved.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -312,7 +312,7 @@
     },
     {
       "name": "read_points",
-      "description": "Read a bounded range of static points. kind selects binary_input (g1), double_bit_input (g3), binary_output (g10), counter (g20), frozen_counter (g21), analog_input (g30), or analog_output (g40). Values include native quality and timestamps where supplied. Use binary_output to read back control status; status is not proof of physical process completion. Missing indexes fail. Unsolicited events received during a read may be confirmed and are preserved in meta.unsolicited. No units or scaling are inferred. Non-finite IEEE values are strings NaN, Infinity and -Infinity; raw quality flags remain unchanged.",
+      "description": "Read a bounded range of static points. kind selects binary_input (g1), double_bit_input (g3), binary_output (g10), counter (g20), frozen_counter (g21), analog_input (g30), or analog_output (g40). Values include native quality and timestamps where supplied. Use binary_output to read back control status; status is not proof of physical process completion. Missing indexes fail. Unsolicited events received during a read may be confirmed and are preserved in meta.unsolicited. No units or scaling are inferred. Non-finite IEEE values are strings NaN, Infinity and -Infinity; raw quality flags remain unchanged. Each call retains at most 128 response fragments, 256 KiB raw response bytes and 4096 points across attempts and unsolicited traffic. Exhaustion returns incomplete response_limit metadata without confirming the overflowing fragment or retrying; already-confirmed events are preserved.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -517,7 +517,7 @@
     },
     {
       "name": "control_binary_output",
-      "description": "Select one target mode and provide only its parameters.\n\naddress: Operate a binary output with a DNP3 control relay output block (CROB, group 12).\n\nvalue=true sends LATCH_ON, value=false sends LATCH_OFF, using\nselect-before-operate unless DNP3_CONTROL_MODE=direct_operate. Refused\nunless DNP3_WRITES_ENABLED=true. Succeeds only when the outstation\nanswers with control status SUCCESS and echoes the control unchanged;\nany other status, a mismatched echo, a timeout or a dropped link is\nreported as a failure, and the error says whether the output may have\nchanged. meta.outcome is \"operated\", \"rejected\", \"not_sent\" (no OPERATE\nor DIRECT_OPERATE was sent) or \"unknown\" (it may have acted; read the\noutput before retrying), and meta.request_sent says whether any control\nrequest may have reached the outstation. Unsolicited data received\nmeanwhile is in meta.unsolicited.\n\nalias: Operate a binary_output point by its point-map alias.\n\nSame as write_binary_output for the outstation and index the alias\nnames, including the DNP3_WRITES_ENABLED gate. Only binary_output\naliases can be written.",
+      "description": "Select one target mode and provide only its parameters.\n\naddress: Operate a binary output with a DNP3 control relay output block (CROB, group 12).\n\nvalue=true sends LATCH_ON, value=false sends LATCH_OFF, using\nselect-before-operate unless DNP3_CONTROL_MODE=direct_operate. Refused\nunless DNP3_WRITES_ENABLED=true. Succeeds only when the outstation\nanswers with control status SUCCESS and echoes the control unchanged;\nany other status, a mismatched echo, a timeout or a dropped link is\nreported as a failure, and the error says whether the output may have\nchanged. meta.outcome is \"operated\", \"rejected\", \"not_sent\" (no OPERATE\nor DIRECT_OPERATE was sent) or \"unknown\" (it may have acted; read the\noutput before retrying), and meta.request_sent says whether any control\nrequest may have reached the outstation. Unsolicited data received\nmeanwhile is in meta.unsolicited.\n\nalias: Operate a binary_output point by its point-map alias.\n\nSame as write_binary_output for the outstation and index the alias\nnames, including the DNP3_WRITES_ENABLED gate. Only binary_output\naliases can be written. Each call retains at most 128 response fragments, 256 KiB raw response bytes and 4096 points across attempts and unsolicited traffic. Exhaustion returns incomplete response_limit metadata without confirming the overflowing fragment or retrying; already-confirmed events are preserved.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -725,7 +725,7 @@
     },
     {
       "name": "poll_class",
-      "description": "Poll an outstation for Class 0 static data or Class 1/2/3 events.\n\nevent_class=0 returns every static point the device reports (inputs,\noutput status, counters). 1, 2 or 3 returns the buffered events of that\nclass and DELETES them on the outstation (they are confirmed), so other\nmasters sharing the association will not see them; repeating the call\ndoes not return them again. Each entry has its point type, index, value,\nquality flags and timestamp if sent. If an event response cannot be\nfully decoded that fragment is not confirmed and the call fails, with\nthe events of fragments already confirmed in meta.confirmed_events; for\nClass 0, meta.incomplete is true and meta.warnings says where decoding\nstopped.\nUnsolicited data received meanwhile is returned in meta.unsolicited.",
+      "description": "Poll an outstation for Class 0 static data or Class 1/2/3 events.\n\nevent_class=0 returns every static point the device reports (inputs,\noutput status, counters). 1, 2 or 3 returns the buffered events of that\nclass and DELETES them on the outstation (they are confirmed), so other\nmasters sharing the association will not see them; repeating the call\ndoes not return them again. Each entry has its point type, index, value,\nquality flags and timestamp if sent. If an event response cannot be\nfully decoded that fragment is not confirmed and the call fails, with\nthe events of fragments already confirmed in meta.confirmed_events; for\nClass 0, meta.incomplete is true and meta.warnings says where decoding\nstopped.\nUnsolicited data received meanwhile is returned in meta.unsolicited. Each call retains at most 128 response fragments, 256 KiB raw response bytes and 4096 points across attempts and unsolicited traffic. Exhaustion returns incomplete response_limit metadata without confirming the overflowing fragment or retrying; already-confirmed events are preserved.",
       "inputSchema": {
         "properties": {
           "outstation_address": {
@@ -1130,7 +1130,62 @@
                 "type": "object",
                 "properties": {
                   "connection": {
-                    "type": "object"
+                    "type": "object",
+                    "properties": {
+                      "connection_type": {
+                        "type": "string"
+                      },
+                      "host": {
+                        "type": "string"
+                      },
+                      "port": {
+                        "type": "integer"
+                      },
+                      "master_address": {
+                        "type": "integer"
+                      },
+                      "timeout_ms": {
+                        "type": "integer"
+                      },
+                      "max_retries": {
+                        "type": "integer"
+                      },
+                      "control_mode": {
+                        "type": "string"
+                      },
+                      "response_limits": {
+                        "type": "object",
+                        "properties": {
+                          "fragments": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "raw_bytes": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "points": {
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        },
+                        "required": [
+                          "fragments",
+                          "raw_bytes",
+                          "points"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "connection_type",
+                      "host",
+                      "port",
+                      "master_address",
+                      "timeout_ms",
+                      "max_retries",
+                      "control_mode",
+                      "response_limits"
+                    ]
                   },
                   "capabilities": {
                     "type": "object",
@@ -1268,7 +1323,62 @@
                   "type": "object",
                   "properties": {
                     "connection": {
-                      "type": "object"
+                      "type": "object",
+                      "properties": {
+                        "connection_type": {
+                          "type": "string"
+                        },
+                        "host": {
+                          "type": "string"
+                        },
+                        "port": {
+                          "type": "integer"
+                        },
+                        "master_address": {
+                          "type": "integer"
+                        },
+                        "timeout_ms": {
+                          "type": "integer"
+                        },
+                        "max_retries": {
+                          "type": "integer"
+                        },
+                        "control_mode": {
+                          "type": "string"
+                        },
+                        "response_limits": {
+                          "type": "object",
+                          "properties": {
+                            "fragments": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "raw_bytes": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "points": {
+                              "type": "integer",
+                              "minimum": 1
+                            }
+                          },
+                          "required": [
+                            "fragments",
+                            "raw_bytes",
+                            "points"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "connection_type",
+                        "host",
+                        "port",
+                        "master_address",
+                        "timeout_ms",
+                        "max_retries",
+                        "control_mode",
+                        "response_limits"
+                      ]
                     },
                     "capabilities": {
                       "type": "object",
@@ -1922,7 +2032,62 @@
       "type": "object",
       "properties": {
         "connection": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "connection_type": {
+              "type": "string"
+            },
+            "host": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer"
+            },
+            "master_address": {
+              "type": "integer"
+            },
+            "timeout_ms": {
+              "type": "integer"
+            },
+            "max_retries": {
+              "type": "integer"
+            },
+            "control_mode": {
+              "type": "string"
+            },
+            "response_limits": {
+              "type": "object",
+              "properties": {
+                "fragments": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "raw_bytes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "points": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "fragments",
+                "raw_bytes",
+                "points"
+              ]
+            }
+          },
+          "required": [
+            "connection_type",
+            "host",
+            "port",
+            "master_address",
+            "timeout_ms",
+            "max_retries",
+            "control_mode",
+            "response_limits"
+          ]
         },
         "capabilities": {
           "type": "object",
